@@ -569,3 +569,12 @@ File này là nguồn bàn giao kỹ thuật cho Codex, ChatGPT hoặc AI khác 
 - **Kiểm thử:** bản xuất từ git chạy cổng 8298 với data trống: `/api/tasks/active` và `/` trả 200; `setup_app.ps1` tạo được exe + lối tắt thử (đã xoá lối tắt thử); `apply_update.ps1` trên bản cài giả: giữ nguyên `app.db`, `master_config.json`, `media`, thêm `suno_workflow.json` còn thiếu, chép mã + dist mới. Quét chuỗi bí mật (sk-, AIza, ghp_, khoá riêng, token): sạch.
 - **Sửa thêm:** `apply_update.ps1` bỏ qua bước sao lưu nếu thiếu thư mục `backend`/`frontend` (trước đó báo lỗi robocopy 16).
 - **Tồn đọng:** chưa thử `install.bat` từ đầu trên máy mới hoàn toàn.
+
+## 2026-11-18 — Dán lời cho bài bị loại «thiếu lời» thì tool nhận lại bài
+
+- **Yêu cầu:** "khi dán lời là phải nhận bài, đây hiện đang không pass" (ảnh: bài «Bỏ qua · thiếu lời» vẫn bị loại sau khi bấm Lưu lời).
+- **Nguyên nhân:** `PUT /api/sources/{id}` chỉ lưu chữ lời; trạng thái `skipped_no_lyrics` và dòng báo lỗi giữ nguyên nên bài vẫn bị loại khỏi Suno Cover.
+- **File đã đổi:** `backend/routers/sources.py` (`update_source`). Bản cũ cất ở `Trash/backup_truoc_dan_loi_20261118/` (máy).
+- **Trước:** dán lời xong bài vẫn «Bỏ qua · thiếu lời». **Sau:** lời không trống → bài đã có file gốc chuyển «Đã tải» + tự xuất WAV tempo 4.5× chạy nền; bài chưa có file → tự xếp hàng tải bài gốc (giữ nguyên lời vừa dán). Lời trống thì vẫn để loại. Không bấm gì trên Suno.
+- **Kiểm thử:** bản sao code + DB tạm (không mở trình duyệt): bài có file → `done`, hết lỗi, tempo 4.5× có file; bài chưa có file → được xếp tải, lời giữ nguyên; lời trống → vẫn `skipped_no_lyrics`. ALL PASS cho cả bản chính và bản 8200.
+- **Tồn đọng:** lô Mix Set đã chạy qua bước bỏ bài thì không tự thêm lại bài vào lô đó — bấm chạy Suno cho bài sau khi nhận lại.
