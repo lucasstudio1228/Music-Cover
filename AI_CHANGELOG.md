@@ -2,6 +2,305 @@
 
 File này là nguồn bàn giao kỹ thuật cho Codex, ChatGPT hoặc AI khác tiếp tục sửa tool. Mục mới được nối ở đầu phần nhật ký, không chứa khóa API hay dữ liệu đăng nhập.
 
+## 2026-11-27 09:58 +07:00 — Bổ sung nút «Lưu lời & Làm lại trên Suno» và «Làm lại trên Suno» ngay khi sửa lời bài hát ở Tab ① & Tab ②
+
+- **Yêu cầu:** Khi lời bài hát bị sai và người dùng sửa lại lời (ở màn hình Tab ① Bài gốc của project như ảnh chụp *Tình Nồng – Tô Chấn Phong*), cần có ngay nút **Làm lại trên Suno** để chạy lại bài cover theo đúng lời mới đã sửa.
+- **Nguyên nhân:**
+  1. Ở Tab ① (`SourcePanel.tsx`), khung sửa lời trước đây chỉ có nút `Lưu lời` và `Đóng`, thanh công cụ bên dưới cũng không có nút đẩy bài sang hàng đợi làm lại trên Suno.
+  2. Ở Tab ② (`SunoCoverPanel.tsx`), nút `Làm thêm / Làm lại trên Suno` cũ từng truyền `tempoOnly: !!redoBpm` (khi `suno_editor_bpm` đã đọc là `32`), dễ làm giữ lại cache style cũ thay vì bắt buộc chạy lại `AI Music Director` theo lời mới; đồng thời chưa có khung sửa lời nhanh ngay tại Tab ②.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `frontend/src/components/cover/SourcePanel.tsx`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`, `backend/routers/sources.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `frontend/src/components/cover/SourcePanel.tsx`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`, `backend/routers/sources.py`.
+- **Trước → Sau:**
+  - **Trong khung sửa lời ở Tab ① (`SourcePanel.tsx`):** Thêm nút nổi bật **«💾 Lưu lời & ↻ Làm lại trên Suno»** ngay cạnh nút `Lưu lời`: tự động lưu lời mới (xóa `lyrics_suno_text`, `suno_style_signature`, tắt `suno_preserve_style`), tự xuất file `tempo 4.50×` nếu bài chưa xuất, cất các bản cover lời sai cũ (nếu có) vào `ban_cover/_loi/` (không xoá file, đồng thời xoá nhãn đỏ báo lỗi cũ), rồi xếp bài vào hàng đợi Suno để `AI Music Director` phân tích lại lời mới và tạo 2 bản cover mới.
+  - **Trên thanh thao tác từng bài ở Tab ① (`SourcePanel.tsx`):** Thêm nút **«↻ Làm lại trên Suno»** để cả khi đã bấm `Lưu lời` đóng khung sửa lời xong vẫn bấm chạy lại trên Suno được ngay tại Tab ①.
+  - **Ở Tab ② (`SunoCoverPanel.tsx`):** Thêm nút **«📝 Sửa lời & Làm lại»** mở khung sửa lời + chạy lại ngay tại chỗ, và đặt `tempoOnly: false` cho nút làm mới để luôn cập nhật đúng lời mới.
+  - Giao diện tĩnh `frontend/dist` được cập nhật trực tiếp trên đĩa (`Cache-Control: no-cache`), có hiệu lực ngay khi chuyển trang / bấm `F5` mà **không cần restart backend** đang chạy lô nền.
+- **Kiểm thử:** `npm run build` thành công 100% trên cả 2 frontend (`SourcePanel` + `SunoCoverPanel`); `unittest tests.test_suno_rejected_lyrics` đạt 100%; xác nhận cổng `8100` vẫn đang chạy tiếp lô nền không gián đoạn.
+- **Tồn đọng:** Không còn (chỉ cần bấm `Ctrl+R` / `F5` trong cửa sổ ứng dụng nếu đang đứng sẵn ở trang cũ để thấy ngay nút mới).
+
+## 2026-11-27 09:54 +07:00 — Chống che khuất thanh nổi khi điền `Exclude styles` trên form Cover
+
+- **Yêu cầu:** Kiểm tra lại tiến trình sau thông báo khởi động lại dịch vụ nền và đảm bảo lô 50 bài tiếp tục chạy ổn định.
+- **Nguyên nhân:** Kiểm tra `/api/tasks/active` cho thấy cổng `8100` vẫn đang chạy tích cực ở bài `20/50` (*Tình bơ vơ - Quang Dũng*, đã xong trọn vẹn `12` bài gồm cả bài `#52` *Luân vũ ngày mưa* vừa hồi phục thành công). Riêng bài `#57` (*Thành phố buồn*) bị thanh nổi dưới đáy panel Create che pointer vào ô `input[placeholder='Exclude styles']` (`intercepts pointer events`).
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_cover.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_cover.py`.
+- **Trước → Sau:** Bổ sung `CoverDriver.fill_exclusions` tự động `scrollIntoView({block: 'center'})` trước khi click và fallback `fill(..., force=True)` kèm sự kiện React `input`/`change` nếu thanh nổi che pointer; tuân thủ quy tắc không restart backend khi cổng `8100` đang chạy bài `#58`.
+- **Kiểm thử:** `unittest tests.test_music_director` đạt 100%; cổng `8100` đang tiếp tục chạy bình thường.
+- **Tồn đọng:** Không còn.
+
+## 2026-11-26 18:13 +07:00 — Tăng độ bền click submenu «Remix → Cover» và khôi phục chạy nối tiếp lô 50 bài sau khi host khởi động lại
+
+- **Yêu cầu:** Tiếp tục chạy quy trình và phản hồi tiến độ hoàn thành.
+- **Nguyên nhân:**
+  1. Trong hơn 1 giờ chạy tự động vừa qua (`16:58 → 18:06`), lô `BatchRun #13` đã hoàn thành thêm hàng loạt bài liên tiếp tới bài `19/49` (*Thành phố buồn - Lệ Quyên*, tổng cộng **11 bài đã hoàn tất đủ 2 WAV + Master + AI căn lời `.srt`**); lúc `18:07` tiến trình nền dừng do hệ thống host restart.
+  2. Riêng bài `#52` (*Luân vũ ngày mưa - Ngọc Lan*) gặp 1 lần submenu Radix `Cover` tự đóng đúng khoảnh khắc `self._click(cover)` (`TimeoutError: Locator.click: Timeout 4000ms exceeded`), làm thoát sớm vòng thử lại 3 lần trong `_remix_cover_from_library`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_cover.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_cover.py`.
+- **Trước → Sau:** Bọc `self._click(cover)` trong `_remix_cover_once` để nếu submenu Radix đóng thoáng qua khi rê chuột thì trả `False` cho `_remix_cover_from_library` tự mở lại menu thử tiếp (tối đa 3 lần), khôi phục trạng thái cho bài `#52` (tận dụng `suno_editor_song_id` đã lưu sẵn, không cần upload lại) & `#57`, bật lại backend + cửa sổ tool và kích hoạt tiếp `auto-run?audio_only=true` cho 31 bài còn lại.
+- **Kiểm thử:** `unittest tests.test_suno_semi_manual` đạt 100%; xác nhận `/api/tasks/active` đang chạy tiếp bình thường trên cổng `8100`.
+- **Tồn đọng:** Lô 50 bài đang tiếp tục chạy tự động từ bài dở đến hết danh sách (`31` bài còn lại).
+
+## 2026-11-26 18:43 +07:00 — Tự động căn Tempo Suno Song Editor về đúng 100% độ dài bài gốc (vòng kín theo Duration timeline)
+
+- **Yêu cầu:** Auto Tempo trong Suno Song Editor đang gán cứng `32`/`35` không chính xác so với chỉnh thủ công; áp dụng cơ chế tự động đọc độ dài trên timeline Song Editor để căn Tempo về đúng **100%** độ dài bài gốc.
+- **Nguyên nhân:** Suno tự đo BPM ban đầu (`B_suno`) mỗi bài khác nhau (ví dụ `120`, `144`, `180` với cùng file `4.5×`), nên ép cứng `32`/`35` làm bài lúc nhanh vù lúc chậm nhão tới ±20%.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `backend/routers/sources.py`, `tests/test_editor_auto_tempo.py` (mới), `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): đồng bộ `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `backend/routers/sources.py`, `tests/test_editor_auto_tempo.py`.
+- **Trước → Sau:**
+  - **Trước:** Chế độ Auto luôn đặt cứng `EDITOR_TEMPO_SLOW = 32` hoặc `EDITOR_TEMPO_FAST = 35` trên Suno Song Editor; xuất lại file tempo mới ở Tab ① chưa xóa `suno_editor_bpm` cũ.
+  - **Sau:**
+    - Bổ sung `audio_duration_seconds`, `compute_duration_matched_bpm`, `_JS_EDITOR_DURATION_SECONDS`, `_unlock_editor_manual_bpm`, `read_editor_duration_seconds` và `set_editor_tempo_for_duration` trong `backend/cover/suno_cover.py`.
+    - Ở chế độ Auto (`suno_editor_bpm == 0`), `suno_jobs.py` đo độ dài thật của bài gốc và truyền `target_duration_sec` vào `CoverDriver.prepare_cover(...)`. Sau khi bật `Manual BPM (Consistent)`, tool đọc `B_hiện_tại` + tổng thời lượng `D_editor` trên timeline (fallback sang độ dài file upload nếu DOM không có), tính `B = round(B_hiện_tại * D_editor / D_gốc)`, rồi kiểm chứng & hiệu chỉnh vòng kín (tối đa 3 nhịp, tự chọn số nguyên gần `100%` độ dài gốc nhất mà không dao động).
+    - Nếu người dùng chủ động nhập tay `editor_bpm` (khi tạo lại), tool giữ nguyên 100% giá trị tay; khi xuất lại file tempo mới ở Tab ① (`sources.export_tempo`), tự reset `suno_editor_bpm = 0` và `suno_editor_song_id = ""` để lượt chạy mới tự căn lại chuẩn.
+- **Kiểm thử:** `py_compile` sạch; `unittest` 6 bộ test (`test_editor_auto_tempo`, `test_music_director`, `test_suno_semi_manual`, `test_suno_lyrics`, `test_source_tempo_edges`, `test_cover_singles_batch`) chạy **76/76 test — OK**.
+- **Kết quả:** Đã hoàn tất và đồng bộ cả tool chính lẫn `Cover Audio Tool`.
+- **Tồn đọng:** Cần đẩy các thay đổi ngày 26/11 lên GitHub `lucasstudio1228/Music-Cover` (đợt push lúc `18:13` trước đó đã bị hủy giữa chừng) trước khi chạy `update.bat`.
+
+## 2026-11-26 16:42 +07:00 — Xử lý hiện tượng treo cửa sổ trắng `about:blank` và chuẩn hoá quy trình chạy tự động end-to-end cho lô Track lẻ / Suno Cover
+
+- **Yêu cầu:** Kiểm tra backend khi tool hiện trình duyệt `about:blank` tưởng như bị treo, giám sát trực tiếp để chuẩn hoá quy trình và chạy end-to-end.
+- **Nguyên nhân:**
+  1. **Mở trình duyệt Suno quá sớm + dư 2 tab `about:blank` (`suno_jobs._drain` & `_ensure_page`):** `_drain()` mở Chrome trước khi `_process` chạy bước khôi phục câu lặp bằng Whisper và gọi OpenAI `AI Music Director`, đồng thời `nct_jobs._live_page(..., work=True)` mở thêm 1 tab `about:blank` thứ hai. Khi bài dài (70 câu / 622 từ như *Một thuở yêu người*) gặp retry + timeout API, cửa sổ Chrome phóng to che kín màn hình ở trạng thái trắng `about:blank` suốt hơn 6 phút.
+  2. **AI Music Director lược bỏ nhầm đoạn điệp khúc lặp + timeout dài (`music_director_prompt.py`, `music_director.py`):** Câu nhắc cũ *"Do not ... repeat ... any sung lyrics"* làm `gpt-4.1` tự xoá phần lời hát lặp lại ở nửa sau bài dài (622 từ còn 394 từ), gây mất 3 vòng auto-repair; `OpenAI(timeout=120.0, max_retries=1)` giữ luồng tới 240 giây mỗi lần proxy nghẽn; ngoài ra model đôi lúc viết `exclude_styles` dạng câu văn xuôi (`"Exclude ... Avoid ... Vietnamese pronunciation"`).
+  3. **Chế độ Bán thủ công (`semi_manual: true` lưu từ cũ trong `data/suno_workflow.json`) & cụm Tempo dọc trong Song Editor Beta (`suno_cover.py`):** Cờ `semi_manual: true` làm mọi bài dừng ở Song Editor chờ người dùng tự bấm `Save as New Song` (tối đa 30 phút), đồng thời `read_editor_tempo()` cũ chỉ đọc cụm ngang `− N +` mà chưa đọc input/cụm dọc `42 ▴▾`.
+  4. **Một bài dính bản quyền lyrics trên Suno làm dừng cả lô 50 bài (`batch_service.py`, `suno_jobs.py`):** Khi 1 bài hiện bảng cam bản quyền (`_CopyrightToast`), worker đứng chờ thủ công 30 phút rồi khi sang `rejected`, `_cover_chain` lại ném `_StopAll` (vốn chỉ dành cho lỗi tài khoản/credit/captcha) khiến cả lô `Track lẻ` dừng hẳn thay vì bỏ qua bài đó và chạy tiếp bài kế.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_jobs.py`, `backend/cover/suno_cover.py`, `backend/cover/music_director_prompt.py`, `backend/cover/music_director.py`, `backend/batch_service.py`, `data/suno_workflow.json`, `tests/test_music_director.py`, `tests/test_suno_semi_manual.py`, `tests/test_cover_singles_batch.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): đồng bộ đầy đủ các module backend/test tương ứng.
+- **Trước → Sau:**
+  - **Chỉ mở trình duyệt Suno sau khi AI Music Director xong & dùng duy nhất 1 tab sạch (`_acquire_driver`, `_clean_suno_tabs`):** Toàn bộ kiểm tra file, khôi phục câu lặp và gọi `AI Music Director` chạy xong hoàn toàn rồi mới mở/đưa trình duyệt vào `https://suno.com/create`, tự đóng mọi tab `about:blank` dư thừa.
+  - **Tăng tốc & chuẩn hoá AI Music Director:** Truyền rõ `original_sung_line_count` + `original_word_count`, bổ sung `reconcile_repeated_stanzas_with_original` tự động căn chuẩn số lần lặp điệp khúc cuối bài (khắc phục dứt điểm lỗi đếm nhầm khổ lặp 501 ↔ 433/668 từ ở các bài như *Nụ hôn biệt ly* hay *Một thuở yêu người* ngay từ lượt gọi đầu trong khi vẫn chặn nghiêm ngặt mọi câu bịa/sửa lời), hạ `timeout=65s, max_retries=0`, và chuẩn hoá `suno.exclude_styles` về danh sách tag âm tính ngăn cách dấu phẩy (`_clean_exclude_styles`).
+  - **Tự động hoá hoàn toàn lô end-to-end:** Chuyển `suno_workflow.json` sang `semi_manual: false`, tự động ép `semi = False` khi chạy trong lô `BatchRun` đang hoạt động, mở rộng đọc/chỉnh Tempo cho biến thể `42 ▴▾` của Song Editor Beta, và cho phép lô `Track lẻ` tự ghi nhận bài lỗi bản quyền riêng lẻ để chuyển ngay sang bài tiếp theo (chỉ dừng cả lô khi lỗi đăng nhập/credit/captcha/đóng trình duyệt).
+- **Kiểm thử:** `unittest` trên `test_music_director`, `test_cover_singles_batch`, `test_suno_copyright_toast`, `test_suno_semi_manual`, `test_audio_only_mode` đạt 100%; giám sát thực tế trên cổng `8100`: bài `#45` (*Lạc mất mùa xuân - Lệ Quyên*) hoàn tất trọn quy trình Suno v6 → tải 2 WAV 48kHz → Master `-14 LUFS` → AI căn lời + `.srt` và tự động chuyển sang bài `#46` (*Nụ hôn biệt ly - Minh Tuyết*).
+- **Tồn đọng:** Khi rảnh toàn bộ hàng đợi (`/api/tasks/active` rỗng), khởi động lại `CoverNhacTool` 1 lần để tiến trình đang chạy nạp luôn bản tối ưu mở trình duyệt trễ từ RAM (cờ `semi_manual: false` đã có hiệu lực trực tiếp ngay trong phiên hiện tại).
+
+## 2026-11-26 12:30 +07:00 — Nâng cấp workflow Suno Auto tích hợp AI Music Director (cấu trúc `[...]` tiếng Anh, lời nối `_`, Style/Exclude Styles & thông số Suno động, xử lý solo nhạc cụ 4–8 bars, Validation Engine & Auto-Repair)
+
+- **Yêu cầu:** Bổ sung **AI Music Director** vào workflow Suno Cover v6 hiện có, sử dụng kết nối OpenAI API (`get_api_config_from_db`) và dữ liệu `SourceSong` / `Project` / `CoverSettings` hiện tại để phân tích từng bài hát độc lập, thiết kế thẻ cấu trúc `[...]` bằng tiếng Anh (giữ nguyên dấu cách trong `[...]`), đổi toàn bộ dấu cách phần lời hát ngoài `[...]` sang `_` (Unicode NFC, bảo toàn 100% lời gốc), viết `Style` (<= 1.000 ký tự), `Exclude Styles` động, tối ưu thông số Suno (`weirdness`, `style_influence`, `audio_influence`, `variety`, `vocal_gender`, `max_mode`), xử lý chính xác đoạn solo 4–8 bars khi người dùng có chọn nhạc cụ bổ sung (và cấm tuyệt đối solo khi không chọn), hậu kiểm bằng Python Validation Engine kèm tự động sửa tối đa 3 lần trước khi gửi sang Song Editor và Cover form.
+- **Nguyên nhân:**
+  1. Workflow cũ (`suno_lyrics.normalize_for_suno` + `style_prompt.generate_cover_styles`) xóa toàn bộ thẻ cấu trúc `[...]`, chỉ tạo chuỗi tag `Styles` ngắn, đồng thời luôn gọi `enforce_vocal_first_styles()` ép `no instrumental solo` và điền cứng `COVER_EXCLUSIONS` (`solo, saxophone solo, guitar solo, horn solo...`) kèm `COVER_SLIDERS` cố định, gây mâu thuẫn trực tiếp khi người dùng chủ động chọn nhạc cụ solo cho bài hát.
+  2. Chưa có tầng kiểm chứng tất định (kiểm tra bảo toàn 100% từ gốc, quy tắc dấu cách trong `[...]` và dấu `_` ngoài `[...]`, giới hạn 5.000 / 1.000 ký tự không cắt cụt, đối chiếu nhạc cụ solo và chống mâu thuẫn `Style` vs `Exclude Styles`) cùng cơ chế tự gửi lỗi cho AI sửa trước khi điền form Suno.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/music_director_prompt.py` (mới), `backend/cover/music_director.py` (mới), `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `backend/models.py`, `backend/migrations.py`, `backend/routers/sources.py`, `tests/test_music_director.py` (mới), `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): đồng bộ toàn bộ các module `backend/cover/music_director_prompt.py`, `backend/cover/music_director.py`, `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `backend/models.py`, `backend/migrations.py`, `backend/routers/sources.py`, `tests/test_music_director.py`.
+- **Trước → Sau:**
+  - **Tách riêng System Prompt & Engine (`music_director_prompt.py`, `music_director.py`):**
+    - Đóng gói System Prompt nhà sản xuất âm nhạc chuyên sâu và builder JSON cho lần gọi đầu lẫn các lượt auto-repair.
+    - `postprocess_structured_lyrics`: chuẩn hóa Unicode NFC, tách riêng dòng thẻ `[...]` nếu dính chữ hát, giữ nguyên dấu cách tiếng Anh bên trong `[...]`, đổi toàn bộ khoảng trắng trên dòng lời hát ngoài `[...]` thành `_`, giữ nguyên lời bè trong ngoặc tròn.
+    - `validate_director_package`: kiểm tra tất định 7 nhóm điều kiện (schema JSON, `len(lyrics) <= 5000` & `0 < len(style) <= 1000` không tự cắt cụt, đối chiếu khớp 100% chuỗi từ với lời gốc sạch, quy tắc `[]` & `_`, bắt buộc có thẻ `[...Solo...]` + mô tả solo trong `style` + không chặn trong `exclude_styles` khi có chọn nhạc cụ bổ sung và cấm hoàn toàn solo khi không chọn, chống mâu thuẫn thể loại với `exclude_styles`, kiểm tra dải thông số Suno và giữ quyền ưu tiên `vocal_gender` của người dùng).
+    - Tự động gửi danh sách lỗi cụ thể cho ChatGPT sửa tối đa **3 lần** (`MAX_REPAIR_ATTEMPTS = 3`); nếu vẫn lỗi (hoặc lời gốc > 5.000 ký tự) thì dừng an toàn riêng bài đó mà không gửi dữ liệu lỗi lên Suno và vẫn để hàng đợi chạy tiếp các bài kế tiếp. Có bộ dựng cục bộ chuẩn hóa khi chưa cấu hình API key.
+  - **Đồng bộ DB, Song Editor & Cover Form (`models.py`, `migrations.py`, `suno_lyrics.py`, `suno_cover.py`, `suno_jobs.py`, `sources.py`):**
+    - Bổ sung migration `M039` thêm `suno_exclude_styles` và `suno_director_json` vào `SourceSong`; chữ ký cache `director_signature` băm đầy đủ `lyrics_text`, thể loại, dòng nhạc, mô tả, giọng hát và nhạc cụ solo của riêng từng bài để chạy hàng loạt không bao giờ rò rỉ ngữ cảnh; giữ nguyên `SourceSong.lyrics_text` sạch cho căn lời Whisper / phụ đề `.srt` và lưu kết quả có `[...]` + `_` vào `SourceSong.lyrics_suno_text`; tôn trọng `suno_preserve_style` khi tạo lại chỉ đổi Tempo.
+    - `prepare_lyrics_for_suno_box`, `fill_editor_lyrics`, `fill_song_lyrics` và `CoverDriver.prepare_cover` bảo toàn thẻ `[...]` tiếng Anh có dấu cách trên cả **Song Editor (Add Lyrics + Styles)** lẫn **Cover form**, đồng thời điền động `exclusions`, `sliders` (`weirdness`, `style_influence`, `variety`, `audio_influence`) và `max_mode`.
+- **Kiểm thử:** Chạy `unittest` trên `test_music_director` cùng toàn bộ các bộ test hồi quy `test_suno_lyrics`, `test_suno_fast_fill`, `test_suno_semi_manual`, `test_cover_style_prompt`, `test_suno_cover`, `test_suno_rejected_lyrics`, `test_audio_only_mode`, `test_cover_qc`, `test_lyrics_repeats` đạt 100%; chạy migration `M039` thành công.
+- **Tồn đọng:** Không còn.
+
+## 2026-11-26 10:33 +07:00 — Sửa lỗi lô Track lẻ bị tự động bỏ qua 48/50 bài chưa chạy và cho nút «Auto chỉ audio» chạy tiếp toàn bộ danh sách
+
+- **Yêu cầu:** Khi ấn **🎧 Auto chỉ audio**, thanh tác vụ hiện lên bài *Tình nhạt phai* (đã xong) rồi tắt luôn không chạy nữa dù trong danh sách còn 48 bài chưa làm; yêu cầu khi ấn **🎧 Auto chỉ audio** phải thực hiện lần lượt các bài tiếp theo trong list.
+- **Nguyên nhân:**
+  1. **Lỗi hẹn giờ 5 phút trên các bài chưa tải (`restore_pending_lyrics_timers` & `skip_missing_lyrics` trong `backend/batch_service.py`):** Khi `BatchRun #13` (danh sách 50 bài Track lẻ `#38..#87`) tạm dừng ở bài 2 (*Tình nhạt phai*), 48 bài kế tiếp (`#40..#87`) còn ở trạng thái `status = "queued"` (chưa từng chạy tải nhạc gốc NCT nên đương nhiên `lyrics_text = ""`). Khi khởi động lại server, `restore_pending_lyrics_timers()` thấy `BatchRun` ở trạng thái `blocked` và `lyrics_text` trống nên tự ý gắn hẹn giờ 5 phút dù `lyrics_auto_skip_at = null`. Sau 5 phút, `skip_missing_lyrics(automatic=True)` đánh dấu nhầm toàn bộ **48 bài chưa từng chạy** thành `skipped_no_lyrics` (*"Tự động bỏ qua sau 5 phút không bổ sung lyrics"*), làm `_run_cover_singles` bỏ qua cả 48 bài trong 0.1 giây (`2/50 bài xong, 48 bài lỗi`).
+  2. **Lỗi chọn lại bài vừa làm xong trên `TaskBar.tsx` / `tasks.py`:** Khi đứng ở trang danh sách `Projects` (`/`), `TaskBar.tsx` lấy `recent[0].project_id` (`#39 Tình nhạt phai` vừa xong) gửi vào `/api/tasks/auto-run`, khiến thanh tác vụ hiện lại tên *Tình nhạt phai* rồi kết thúc ngay.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/batch_service.py`, `backend/routers/tasks.py`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`, `tests/test_audio_only_mode.py`, `AI_CHANGELOG.md` (+ khôi phục 48 bài `#40..#87` của `BatchRun #13` trong `data/app.db`).
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/batch_service.py`, `backend/routers/tasks.py`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **Không bao giờ bỏ qua bài chưa tải (`_is_missing_lyrics`, `restore_pending_lyrics_timers`, `revive_untried_sources`):** Chỉ coi là bài thiếu lyrics khi bài đã qua bước tải NCT (`status` không thuộc `queued`, `running`, `stopped`, `skipped_no_lyrics`, `excluded`) mà vẫn không có lời; chỉ khôi phục hẹn giờ 5 phút khi lô thực sự có `lyrics_auto_skip_at` / `lyrics_resume_pending`. Tự động hồi sinh (`revive_untried_sources`) mọi bài chưa từng tải (`file_path` và `title` rỗng) bị dính cờ `skipped_no_lyrics` cũ về lại `queued`.
+  - **Chạy tiếp toàn bộ các bài còn lại khi bấm «🎧 Auto chỉ audio»:** Ở trang danh sách `Projects`, `TaskBar.tsx` không gửi lại ID bài cũ vừa xong mà để `/api/tasks/auto-run` tự tìm bài **đầu tiên chưa hoàn tất** trong danh sách (bài `#40 Sa mạc tình yêu - Lệ Quyên`, bài `3/50`) và kích hoạt `resume_batch` chạy tuần tự hết `40 → 41 → … → 87` (kể cả khi bấm từ trong một bài đã xong thuộc lô nhiều bài cũng tự nhảy sang bài kế tiếp chưa làm).
+- **Kiểm thử:** `unittest` trên `test_audio_only_mode` (gồm test hồi quy danh sách nhiều bài bị dừng ở bài 2 + server restart không bao giờ skip bài 3..N và `Auto chỉ audio` chạy tiếp trọn danh sách) đạt 100%; `npm run build` thành công trên cả 2 frontend; đã khôi phục 48 bài của `BatchRun #13` về `queued` trong `data/app.db`.
+- **Tồn đọng:** Mở lại `start.bat` (nếu đang tắt) và bấm **🎧 Auto chỉ audio** để chạy tiếp ngay từ bài 3/50 (*Sa mạc tình yêu - Lệ Quyên*).
+
+## 2026-11-26 09:58 +07:00 — Sửa lỗi không nhận diện được ô Styles trong Song Editor Beta khi nằm chung thẻ với Exclude Styles
+
+- **Yêu cầu:** Kiểm tra và khắc phục lỗi `Styles` trong Song Editor không thay đổi (vẫn giữ câu *"An electronic dance instrumental featuring a synthesizer..."* dù `Add Lyrics` đã điền thành công).
+- **Nguyên nhân:** Qua `_suno.log` thực tế lúc `09:41` và `09:52` (bài *Dĩ Vãng Nhạt Nhòa* và *Tình Nhạt Phai*) cùng ảnh chụp DOM thực tế, trong Song Editor Beta, mục **Styles** và **Exclude Styles** được đặt **chung trong một khung bo góc duy nhất**. Biểu thức dừng leo cây cũ trong `_JS_MARK_EDITOR_STYLES` có điều kiện `if (/\bexclude\s+styles\b/i.test(pText)) break;` nên vừa bước từ dòng tiêu đề `Styles` lên khung bao chung đã thoát ngay trước khi chạm tới ô nhập `Styles` nằm bên dưới, dẫn tới log `"Song Editor hiện không có ô Styles"`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_cover.py`, `tests/test_suno_semi_manual.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_cover.py`, `tests/test_suno_semi_manual.py`.
+- **Trước → Sau:**
+  - **`_JS_MARK_EDITOR_STYLES` & `sync_editor_lyrics_and_styles` (`backend/cover/suno_cover.py`):**
+    - Điền `Add Lyrics` trước rồi tự động `scrollIntoView` tiêu đề `Styles` (tránh trường hợp bung `Add Lyrics` dài 35–53 câu đẩy ô `Styles` trôi khuất khỏi khung nhìn cột trái).
+    - Định vị ô nhập `Styles` theo tọa độ hình học **nằm dưới tiêu đề `Styles` và nằm trên tiêu đề `Exclude Styles`** (hỗ trợ cả khi hai mục nằm chung một thẻ cha, hỗ trợ cả `<textarea>`, `<input>`, `[contenteditable]` / `[role=textbox]`, lẫn trường hợp phải click vào khung mô tả trước mới mount ô nhập).
+    - Xoá sạch văn bản cũ (`Ctrl+A` + `Delete`), điền prompt `Styles` AI, phát sự kiện `input`/`change`/`blur` để React lưu state và đọc lại xác nhận khớp 100%; lưu probe DOM cột trái nếu thiếu control.
+- **Kiểm thử:** `unittest` trên `test_suno_semi_manual` (gồm test mô phỏng DOM thực tế `Styles` và `Exclude Styles` nằm chung một thẻ `div` cha) đạt 100%; nạp lại backend cổng `8100` khi `/api/tasks/active` rỗng.
+- **Tồn đọng:** Không còn.
+
+## 2026-11-26 09:26 +07:00 — Tự động điền Add Lyrics (nối «_») và đồng bộ Styles AI ngay trong Suno Song Editor
+
+- **Yêu cầu:** Ở phần **Song Editor** trong workflow Suno của tool hiện có thêm mục **Add Lyrics** và **Styles**; cần tự động bấm mở **Add Lyrics** điền lyrics với dấu cách thay bằng dấu `_` và đồng bộ ô **Styles** với đúng prompt của phần Cover do AI soạn.
+- **Nguyên nhân:** Suno Song Editor Beta mới bổ sung cột trái gồm **Add Lyrics** (thu gọn mặc định) và **Styles** (Suno tự điền sẵn mô tả nhận diện nhầm từ file tăng tốc 4.5x như *"An electronic dance instrumental featuring a synthesizer, drum machine, and bass; energetic"*). Trước đây `prepare_editor_source` và `wait_user_editor_save` trong `backend/cover/suno_cover.py` chỉ xử lý Tempo + `Save as New Song`, chưa điền `Add Lyrics` và chưa ghi đè `Styles` trong Song Editor.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`, `HUONG_DAN.md`, `tests/test_suno_semi_manual.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_cover.py`, `backend/cover/suno_jobs.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **Song Editor (`fill_editor_styles`, `fill_editor_lyrics`, `sync_editor_lyrics_and_styles` trong `suno_cover.py`):**
+    - Đảm bảo cột trái của Song Editor đang ở tab **Edit**.
+    - Dò ô **Styles** trong cột trái Song Editor (tránh nhầm *Exclude Styles* và tránh bấm nhầm nút `↺` Reset), xóa mô tả instrumental tự sinh của Suno và điền + xác nhận đúng chuỗi prompt `styles` do AI soạn cho phần Cover.
+    - Dò mục **Add Lyrics** đang thu gọn (`⌄`), tự bấm mở ô nhập lời, chuẩn hóa qua `normalize_for_suno` (thay khoảng trắng bằng `_`, tách khổ 4 câu) rồi dán + kiểm chứng đủ từng câu (hỗ trợ cả `<textarea>` được React kiểm soát lẫn ô Lexical `contenteditable` / `[role=textbox]`).
+    - Chạy đồng bộ ở **cả 2 chế độ**: chế độ Tự động (`prepare_editor_source`) và chế độ Bán thủ công (`wait_user_editor_save` — điền sẵn ngay khi mở Editor trước khi chờ người dùng chỉnh Tempo & bấm `Save as New Song`).
+- **Kiểm thử:** `unittest` trên `test_suno_semi_manual`, `test_suno_fast_fill`, `test_suno_lyrics`, `test_cover_style_prompt` đạt 100%; `npm run build` thành công trên cả 2 frontend.
+- **Tồn đọng:** Nếu đang mở `start.bat` từ trước thì khởi động lại khi `/api/tasks/active` rỗng để nạp workflow Song Editor mới.
+
+## 2026-11-26 02:21 +07:00 — Bổ sung bộ nút căn lời thủ công cho các câu giữa bài và sửa lỗi dồn chụm câu sau nhạc dạo
+
+- **Yêu cầu:** Ở giữa bài AI căn vẫn có câu chưa chuẩn, vẫn cần có đầy đủ nút chỉnh thủ công.
+- **Nguyên nhân:**
+  1. Ở Tab **③ Lời bài hát** (`CoverPanel.tsx`), khi vài câu ở giữa bài (đặc biệt ngay sau đoạn nhạc dạo gian tấu, ví dụ câu `#21–#23` của *Sầu Tím Thiệp Hồng*) bị lệch hoặc Suno bỏ/thêm câu lặp, giao diện cũ chỉ có nút `⏱đầu / ⏹cuối` rời rạc và dịch cả bài `±0.2s`, thiếu chế độ **gõ nhịp thủ công theo câu (Tap-Sync)** cũng như các nút **chỉnh tay riêng 1 câu / dịch từ câu đang chọn về cuối / thêm–xoá câu / chia đều giữa các mốc 📌**.
+  2. Trong `backend/cover/align.py` (`align_between_anchors`), khi gặp khoảng nhạc dạo dài ở giữa bài, `stable-ts` đôi khi gom 2–3 câu ngay sau nhạc dạo vào một mẩu `< 0.4s` (`158.12s -> 158.24s -> 158.24s`, thời lượng `0.00s`) trước câu kế tiếp ở `184.68s`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `frontend/src/components/cover/CoverPanel.tsx`, `frontend/dist/*`, `backend/cover/align.py`, `tests/test_lyrics_repeats.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `frontend/src/components/cover/CoverPanel.tsx`, `frontend/dist/*`, `backend/cover/align.py`.
+- **Trước → Sau:**
+  - **Chế độ «🎹 Căn lời thủ công» (Tap-Sync trực quan):**
+    - Thêm nút **🎹 Căn lời thủ công** trên thanh công cụ và nút **🎹** ngay trên từng dòng (nhảy tới trước câu bất kỳ ở giữa bài 1.5s và bật chế độ gõ nhịp ngay từ câu đó; nếu bài chưa căn cũng tự khởi tạo dòng từ lời thô để chấm tay từ đầu).
+    - Khung điều khiển cố định hiển thị câu trước / câu đang chờ chấm / câu tiếp theo, nút lớn **👇 Chấm BẮT ĐẦU câu & qua câu kế (`Space`)** (tự khép giờ kết thúc câu trước không chồng lấn), **⏹ Ngắt KẾT THÚC câu vừa hát (`Phím E`)**, tua `⏪ -3s / ⏩ +3s` (`←/→`), chọn tốc độ nghe `0.75× / 1× / 1.25× / 1.5×`.
+  - **Thanh nút thủ công cho câu đang chọn (`🛠 Câu #N`):**
+    - Dịch nhanh **riêng câu đang chọn** (`±0.2s, ±0.5s`).
+    - Dịch nhanh **từ câu đang chọn đến hết bài** (`±0.2s, ±0.5s, ±1s`) — xử lý tức thì khi cả đoạn sau nhạc dạo lệch đồng loạt.
+    - **📏 Chia đều giữa các 📌** (chia thủ công tức thì không cần chờ AI), **➕ Thêm câu**, **🗑 Xoá câu** (xoá ngay câu lặp Suno không hát), và tô đỏ cảnh báo cả câu bị chụm `< 0.35s`.
+  - **Backend (`align._repair_collapsed_runs`):** Tự phát hiện cụm câu bị Whisper gom chụm `< 0.4s` cạnh vùng có giọng hát và phân bổ lại theo vùng vocal thực tế, đồng thời bảo đảm không bao giờ sinh câu thời lượng `0.00s`.
+- **Kiểm thử:** `unittest` trên `test_lyrics_repeats`, `test_audio_only_mode`, `test_cover_qc` đạt 100%; `npm run build` (`tsc -b && vite build`) thành công trên cả 2 frontend.
+- **Tồn đọng:** Nếu đang mở tool từ trước thì tải lại trang (`Ctrl+F5`) hoặc khởi động lại `start.bat` khi `/api/tasks/active` rỗng để nhận giao diện và backend mới.
+
+## 2026-11-26 01:22 +07:00 — Sửa lỗi bấm «Auto chỉ audio» không chạy tác vụ nào sau khi tắt nhầm trình duyệt Suno
+
+- **Yêu cầu:** Sau khi tắt nhầm trình duyệt làm Suno, ấn **🎧 Auto chỉ audio** không có tác vụ nào được thực hiện; kiểm tra và khắc phục.
+- **Nguyên nhân:**
+  1. Ở Project `#34` (*Sầu Tím Thiệp Hồng*), các bản cover trước đó vừa được xoá vào Thùng rác (`DeletedTrack #59, #60` — cơ chế thùng rác giữ nguyên file `.wav` trong `ban_cover/` và `ban_cover/mastered/` để khôi phục, chỉ xoá dòng `Track` và `CoverSong` trong SQLite), sau đó lượt làm Suno mới bị tắt nhầm trình duyệt nên `SourceSong #178` mang `suno_status = "failed"` (`TargetClosedError`) và project có **0 bản cover hoạt động**.
+  2. Khi người dùng bấm **🎧 Auto chỉ audio** (`01:15:26`), `tasks._auto_worker` gọi `batch_service.resume_batch(...)` → `_run_cover_singles(...)` → `_verify_product(34)` → `_verify_audio(34)`. Hàm `_verify_audio` cũ chỉ kiểm tra trên ổ đĩa có file âm thanh nào trong `ban_cover/mastered` hay không (`audio_folder(34)` thấy file của bản đã đưa vào Thùng rác!) và đếm `CoverSong` chưa căn lời (`0` dòng vì bảng trống!), hoàn toàn không kiểm tra `SourceSong.suno_status == "done"` hay sự tồn tại của `Track`/`CoverSong` đang hoạt động trong DB. Do đó `_verify_audio(34)` trả `True` ngay sau 0.05 giây, báo `Hoàn tất Track lẻ: 1/1 bài xong` và bỏ qua toàn bộ Suno + AI căn lời.
+  3. Ngoài ra, khi tắt trình duyệt Suno hoặc đứng ở trang danh sách project (`/`), `suno_jobs` chưa đưa trạng thái vừa kết thúc/lỗi lên mục `recent` của `/api/tasks/active`, và `auto_run` chỉ đọc `BatchRun.current_project_id` (vốn đã bị xoá về `None` khi lô dừng) nên có thể không tự chọn được project vừa dở việc; đồng thời tiến trình `uvicorn` cổng `8100` không bật `--reload` nên cần nạp lại khi rảnh việc.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/batch_service.py`, `backend/cover/suno_jobs.py`, `backend/routers/tasks.py`, `frontend/src/api/tasks.ts`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`, `tests/test_audio_only_mode.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/batch_service.py`, `backend/cover/suno_jobs.py`, `backend/routers/tasks.py`, `frontend/src/api/tasks.ts`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **`_verify_audio` & `_unaligned_cover_count` (`backend/batch_service.py`):** Bắt buộc kiểm tra mọi `SourceSong` hoạt động phải `suno_status == "done"` và gắn với ít nhất 1 `CoverSong` + `Track` còn sống trong DB/trên đĩa, có ít nhất 1 `Track` hoạt động (không bao giờ đếm nhầm file của `DeletedTrack` trong Thùng rác), mọi `Track` hoạt động đã AI căn lời (`done`/`edited`), và Mix Set có bản `Mix` hoàn tất.
+  - **Khôi phục mượt khi đóng trình duyệt Suno (`suno_jobs.py`, `tasks.py`, `TaskBar.tsx`):** Nhận diện `TargetClosedError` / đóng trình duyệt giữa chừng để dừng hàng đợi an toàn với thông báo tiếng Việt rõ ràng, kiểm tra cả `context.pages` khi mở lại trình duyệt, ghi nhận tác vụ Suno vừa xong/lỗi vào `recent` trên thanh tác vụ, và tự suy ra `default_project_id` của project vừa bị gián đoạn kể cả khi bấm `Auto chỉ audio` từ ngoài trang chủ.
+- **Kiểm thử:** `unittest` trên `test_audio_only_mode`, `test_cover_qc`, `test_suno_semi_manual`, `test_lyrics_repeats` đạt 100%; `npm run build` thành công trên cả 2 frontend; kiểm tra `/api/tasks/active` rỗng trước khi nạp lại backend cổng `8100`.
+- **Tồn đọng:** Không còn; người dùng có thể bấm lại **🎧 Auto chỉ audio** ngay lập tức.
+
+## 2026-11-26 01:08 +07:00 — Xoá cờ báo lỗi cũ khi Tạo lại Suno và sửa mốc so độ dài QC
+
+- **Yêu cầu:** Khi ấn **🚩 Báo lỗi** và **🔁 Tạo lại** trên Suno, sau khi tạo lại xong không còn dấu báo lỗi nữa (sửa lỗi bản vừa tạo lại vẫn bị dính `🔴 Lỗi` / `Bạn đã báo bản này bị lỗi`, kèm cảnh báo nhầm `Dài hơn bài gốc nhiều (4:24 so với 1:04)`).
+- **Nguyên nhân:**
+  1. `cover_qc.json` lưu `manual_flags` theo số nguyên `Track.id` đơn thuần, còn `redo_cover` và `_trash_track` xoá `Track` khỏi SQLite mà không xoá `Track.id` khỏi `manual_flags`. Khi các bản cover cuối bảng `track` bị xoá/tạo lại (như `Track #125, #126` ở Project `#34`), SQLite cấp lại đúng `Track.id = 125` cho bản cover mới vừa tải từ Suno, khiến `cover_qc` tưởng nhầm bản mới chính là bản lỗi cũ và tiếp tục hiện `🔴 Lỗi — Bạn đã báo bản này bị lỗi`.
+  2. `redo_cover` chuyển file cover lỗi sang `ban_cover/_loi/` nhưng chưa dọn bản `_master` / `.srt` / backup tempo đi kèm tên file cũ.
+  3. `cover_qc.review` và `sources._covers_of` lấy `src.tempo_file_path or src.file_path` làm mốc tham chiếu độ dài, tức lấy nhầm bản tăng tốc `4.50x` (`1:04`) thay vì bài gốc thật (`4:48`) dù Suno Editor đã hạ nhịp về tốc độ gốc trước khi tạo Cover, gây cảnh báo giả `Dài hơn bài gốc nhiều (4:24 so với 1:04)`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/cover_qc.py`, `backend/routers/sources.py`, `backend/routers/tracks.py`, `tests/test_cover_qc.py`, `AI_CHANGELOG.md` (+ làm sạch `cover_qc.json` hiện hữu của Project `#34`).
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/cover_qc.py`, `backend/routers/sources.py`, `backend/routers/tracks.py`.
+- **Trước → Sau:**
+  - **Xoá cờ lỗi triệt để + phòng vệ kép theo `file_key`:**
+    - Thêm `cover_qc.forget_tracks(...)` và gọi ngay tại `redo_cover`, `_trash_track`, và `attach_cover_file` để xoá tức thì `manual_flags`, `dismissed`, `flag_keys`, `covers` của ID cũ; đồng thời dọn sạch bản `_master`, `.srt` và backup tempo của file bị chuyển vào `_loi/`.
+    - Gắn `flag_keys[track_id] = file_key` (`size:mtime`) khi bấm `🚩 Báo lỗi` / `✓ Nghe ổn` (và cập nhật qua `rebind_file_key` khi chỉnh tempo tại chỗ). Nếu `Track.id` hoặc đường dẫn file mang nội dung audio mới khác `file_key`, cả `evaluate()` lẫn `review()` tự động vô hiệu hoá cờ lỗi cũ.
+  - **Mốc so sánh QC chuẩn:** `cover_qc.review` và `sources._covers_of` ưu tiên `src.file_path` (bài gốc tốc độ chuẩn) trước `src.tempo_file_path`, chấm dứt cảnh báo giả `4:24 so với 1:04` và bắt đúng lỗi bị cụt thật sự so với bài gốc.
+- **Kiểm thử:** `unittest` trên `test_cover_qc`, `test_track_recovery`, `test_nct_source`, `test_suno_semi_manual` đạt 100%; chạy lại `cover_qc.review(34)` cho Project `#34` xác nhận cả 2 bản cover mới đều `status = "ok"`, `manual_flags = []`.
+- **Tồn đọng:** Nếu tiến trình backend cổng `8100` đang chạy phiên code cũ thì khởi động lại tool khi `/api/tasks/active` rỗng để nạp logic mới cho các lần bấm `🔁 Tạo lại` tiếp theo (riêng `cover_qc.json` của Project `#34` đã được làm sạch ngay trên đĩa).
+
+## 2026-11-26 01:01 +07:00 — Giữ câu đầu & câu cuối, AI tự căn lại toàn bộ phần còn lại
+
+- **Yêu cầu:** Khi AI căn lời bị lỗi, người dùng chỉ cần căn lại **câu đầu** và **câu cuối** của bài hát, AI phải tự căn lại toàn bộ các câu còn lại ở giữa thay vì bắt người dùng căn tay cả bài.
+- **Nguyên nhân:** Trước đây Tab **③ Lời bài hát** chỉ có «🤖 AI căn lời bài này» (ghi đè lại từ đầu cả bài, mất mốc người dùng vừa chỉnh) hoặc sửa tay từng câu một / dịch đều `±0.2s, ±0.5s`, chưa có chế độ khóa mốc neo đầu–cuối để ép Whisper căn phần giữa trong đúng khung thời gian vocal đó.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/align.py`, `backend/cover/jobs.py`, `backend/routers/cover.py`, `frontend/src/api/cover.ts`, `frontend/src/components/cover/CoverPanel.tsx`, `frontend/dist/*`, `HUONG_DAN.md`, `tests/test_lyrics_repeats.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/align.py`, `backend/cover/jobs.py`, `backend/routers/cover.py`, `frontend/src/api/cover.ts`, `frontend/src/components/cover/CoverPanel.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **Backend (`align.align_between_anchors`, `jobs.submit_between`, `POST /api/cover/songs/{song_id}/align-between`):**
+    - Giữ cố định tuyệt đối câu đầu (`0`) và câu cuối (`N - 1`) (cùng bất kỳ câu giữa bài nào người dùng bấm ghim `📌`).
+    - Dùng lại ngay file vocal 16kHz đã tách sẵn trong `data/cover_cache/` (không tốn thời gian tách Demucs lại), cắt đúng lát audio giữa hai mốc neo (`[left.end .. right.start]`, hoặc tự ước lượng `left.end` nếu người dùng mới chấm giờ bắt đầu câu đầu) để ép Whisper `align(..., original_split=True)` chỉ dò trong khung đó — không bao giờ trôi sang nhạc dạo đầu/cuối bài. Có bộ chia tỷ lệ theo vùng vocal làm dự phòng nếu lát hẹp thiếu segment.
+    - Lưu kết quả với `align_status = "edited"` (không bị «AI căn lời các bài chưa căn» ghi đè) và tự động xuất lại `.srt` cạnh file cover/master cũng như `nhac_mix/<project>.srt`.
+  - **Giao diện (`CoverPanel.tsx`):**
+    - Đánh dấu sẵn **📌Đầu** (câu đầu) và **📌Cuối** (câu cuối), hỗ trợ bấm **📌** ở câu giữa bài nếu muốn khóa thêm mốc trung gian, bổ sung cặp nút chấm nhanh **⏱đầu / ⏹cuối** theo vị trí đang phát và cập nhật tức thời `TimeInput` ngay khi gõ.
+    - Thêm nút nổi bật **«🎯 Giữ câu đầu & cuối — AI căn lại phần còn lại»** ngay cạnh «Lưu mốc thời gian».
+- **Kiểm thử:** `unittest` trên `test_lyrics_repeats`, `test_audio_only_mode`, `test_suno_semi_manual`, `test_lyrics_export` đạt 100%; `npm run build` (`tsc -b && vite build`) thành công trên cả 2 frontend.
+- **Tồn đọng:** Nếu đang có backend cũ chạy dở việc thì khởi động lại tool khi `/api/tasks/active` rỗng để nạp endpoint mới `/align-between`.
+
+## 2026-11-26 00:53 +07:00 — Tự động bấm Create sau khi điền đủ thông số form Cover (kể cả chế độ Bán thủ công)
+
+- **Yêu cầu:** Hiện tại workflow đang dừng lại chờ bấm `Create` sau khi điền xong form Cover; bổ sung nhiệm vụ tự động ấn `Create` sau khi mọi thông số đã hoàn tất và tự động tiến hành các bước tiếp theo.
+- **Nguyên nhân:** `data/suno_workflow.json` đang bật `semi_manual: true` (chế độ **✋ Bán thủ công**). Trong `backend/cover/suno_jobs.py`, sau khi `drv.prepare_cover(...)` đã điền đầy đủ Lyrics/Styles/Exclude styles/thanh trượt, nhánh `if semi:` gọi `_await_semi_create(...)` nên dừng lại chờ người dùng tự bấm `Create` thay vì gọi `drv.click_create()`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_jobs.py`, `backend/video/suno_driver.py`, `backend/routers/sources.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`, `HUONG_DAN.md`, `tests/test_suno_semi_manual.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_jobs.py`, `backend/video/suno_driver.py`, `backend/routers/sources.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **Trước:** Ở chế độ `semi_manual`, sau khi người dùng chỉnh Tempo + bấm `Save as New Song` trong Editor và tool điền xong form Cover, workflow dừng lại ở `_await_semi_create` chờ người dùng tự bấm `Create`.
+  - **Sau:** Ở cả chế độ tự động lẫn `semi_manual` (trừ `🧪 Chạy thử / dry_run`), ngay khi `drv.prepare_cover` hoàn tất mọi thông số trên form Cover, tool tự xoá bộ lọc thư viện dự phòng, gọi `drv.click_create()`, tự theo dõi bảng cam bản quyền (`_create_and_watch`), tải 2 bản WAV (`_download_all`), chạy `mastering`, nhập `CoverSong` và nối tiếp sang bước kế tiếp (bài tiếp theo / AI căn lời `.srt` / ghép Mix / dựng Video).
+- **Kiểm thử:** `unittest` trên `test_suno_semi_manual`, `test_audio_only_mode`, `test_cover_style_prompt`, `test_lyrics_repeats`, `test_suno_lyrics`, `test_suno_fast_fill` đạt 100%; `npm run build` (`tsc -b && vite build`) thành công trên cả 2 frontend.
+- **Tồn đọng / Vận hành:** Phiên Suno đang treo chờ ở code cũ trên cổng `8100` nên không tự restart backend theo quy tắc `AGENTS.md`; người dùng bấm **⏹ Dừng lại**, đóng/mở lại tool để nạp code mới (hoặc bấm Create nốt cho lượt đang mở).
+
+## 2026-11-26 00:53 +07:00 — Tự động bấm Create sau khi điền đủ thông số form Cover (kể cả chế độ Bán thủ công)
+
+- **Yêu cầu:** Hiện tại workflow đang dừng lại chờ bấm `Create` sau khi điền xong form Cover; bổ sung nhiệm vụ tự động ấn `Create` sau khi mọi thông số đã hoàn tất và tự động tiến hành các bước tiếp theo.
+- **Nguyên nhân:** `data/suno_workflow.json` đang bật `semi_manual: true` (chế độ **✋ Bán thủ công**). Trong `backend/cover/suno_jobs.py`, sau khi `drv.prepare_cover(...)` đã điền đầy đủ Lyrics/Styles/Exclude styles/thanh trượt, nhánh `if semi:` gọi `_await_semi_create(...)` nên dừng lại chờ người dùng tự bấm `Create` thay vì gọi `drv.click_create()`.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/suno_jobs.py`, `backend/video/suno_driver.py`, `backend/routers/sources.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`, `HUONG_DAN.md`, `tests/test_suno_semi_manual.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/cover/suno_jobs.py`, `backend/video/suno_driver.py`, `backend/routers/sources.py`, `frontend/src/components/cover/SunoCoverPanel.tsx`, `frontend/dist/*`.
+- **Trước → Sau:**
+  - **Trước:** Ở chế độ `semi_manual`, sau khi người dùng chỉnh Tempo + bấm `Save as New Song` trong Editor và tool điền xong form Cover, workflow dừng lại ở `_await_semi_create` chờ người dùng tự bấm `Create`.
+  - **Sau:** Ở cả chế độ tự động lẫn `semi_manual` (trừ `🧪 Chạy thử / dry_run`), ngay khi `drv.prepare_cover` hoàn tất mọi thông số trên form Cover, tool tự xoá bộ lọc thư viện dự phòng, gọi `drv.click_create()`, tự theo dõi bảng cam bản quyền (`_create_and_watch`), tải 2 bản WAV (`_download_all`), chạy `mastering`, nhập `CoverSong` và nối tiếp sang bước kế tiếp (bài tiếp theo / AI căn lời `.srt` / ghép Mix / dựng Video).
+- **Kiểm thử:** `unittest` trên `test_suno_semi_manual`, `test_audio_only_mode`, `test_cover_style_prompt`, `test_lyrics_repeats`, `test_suno_lyrics`, `test_suno_fast_fill` đạt 100%; `npm run build` (`tsc -b && vite build`) thành công trên cả 2 frontend.
+- **Tồn đọng / Vận hành:** Phiên Suno đang treo chờ ở code cũ trên cổng `8100` nên không tự restart backend theo quy tắc `AGENTS.md`; người dùng bấm **⏹ Dừng lại**, đóng/mở lại tool để nạp code mới (hoặc bấm Create nốt cho lượt đang mở).
+
+## 2026-11-26 00:46 +07:00 — Sửa lỗi hát không hết lời và toàn nhạc solo (Sầu Tím Thiệp Hồng #178)
+
+- **Yêu cầu:** Xử lý lỗi bài **Sầu Tím Thiệp Hồng** (`SourceSong #178`, `Project #34`) hát không hết lời, phần lớn thời lượng biến thành nhạc dạo/solo.
+- **Nguyên nhân xác định (đo trực tiếp file gốc, 2 bản cover WAV và ảnh debug form Suno):**
+  1. **Thiếu gần nửa lời bài hát do trang nguồn chỉ chép 1 lượt:** Bản thu gốc `nhac_goc/Sầu Tím Thiệp Hồng - Lệ Quyên, Quang Lê.mp3` dài **288s (4p48s)**, trong đó từ `180.8s–267.4s` hát lặp lại toàn bộ nửa sau (`Hôm nay nhìn xe kết hoa… → Sầu dâng lên tím biết bao giờ cho khuây?` × 2, tổng **32 câu / 313 từ**). Tuy nhiên lời lấy từ NhacCuaTui chỉ có **20 câu / 196 từ** (0.68 từ/giây) và dính liền thành **1 khối duy nhất không dòng trống (`1 đoạn`)**, khiến Suno Cover (bám theo độ dài ~4p35s của bài Editor) bị lệch cấu trúc, chỉ hát 4 câu ở `90s–119.6s` rồi để trống 3,5 phút nhạc.
+  2. **Ô `Exclude styles` trên Suno bị bỏ trống + thiếu khóa `continuous vocal melody throughout`:** File `tempo 4.5x` sau khi lưu ở Editor được Suno tự gắn nhãn nội bộ là *"An electronic dance instrumental..."* (xem `create_form_ready_002545.png`). Khi `Styles` rút gọn ở `v9` bỏ cụm duy trì giọng hát xuyên suốt và không điền `Exclude styles` trong `More Options` (lại có thêm `subtle saxophone`), Suno v6 ưu tiên kéo dài đoạn dạo/solo nhạc cụ thay vì hát hết lời.
+  3. **Kiểm tra thể loại đầu ra AI quá chặt với thẻ ghép:** `genre_key(first_tag)` ưu tiên alias dài hơn (`"acoustic"` dài hơn `"ballad"`), làm các thẻ kiểu `"Slow acoustic ballad"` bị bác bỏ nhầm (`ValueError: AI không giữ đúng thể loại đã chọn` trong `_suno.log`).
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/align.py`, `backend/cover/nct_jobs.py`, `backend/cover/suno_jobs.py`, `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/style_prompt.py`, `backend/video/config.py`, `tests/test_cover_style_prompt.py`, `tests/test_lyrics_repeats.py`, `AI_CHANGELOG.md` + cập nhật trực tiếp dữ liệu lời đầy đủ cho `SourceSong #178` trong `data/app.db` và file `.txt`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): đồng bộ `backend/cover/align.py`, `backend/cover/nct_jobs.py`, `backend/cover/suno_jobs.py`, `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/style_prompt.py`, `backend/video/config.py`.
+- **Trước → Sau:**
+  - **Khôi phục lời hát lặp từ bài gốc (`expand_source_lyrics_from_audio`):** Khi bài gốc dài `>= 140s` mà lời có mật độ `< 1.02 từ/giây`, tool tự đối chiếu audio bài gốc bằng Whisper + `expand_repeated_lyrics` để khôi phục đầy đủ các khổ/ĐK lặp sau nhạc dạo (giữ 100% chính tả chuẩn từ lời gốc, giải phóng VRAM ngay sau khi xong). Bài `#178 Sầu Tím Thiệp Hồng` đã được khôi phục từ `20 câu (196 từ, 1 đoạn)` lên **`32 câu (313 từ)`**.
+  - **Tự ngắt khổ 4 câu cho Suno (`normalize_for_suno`):** Bài lời dính liền 1 khối `>= 8` câu không có dòng trống được tự chia thành các khổ 4 câu cách nhau 1 dòng trống (`\n\n`) kèm `_` nối từ (bài `#178` thành **9 khổ chuẩn** thay vì 1 khối đặc).
+  - **Khóa `COVER_EXCLUSIONS` + `continuous vocal melody throughout`:** `CoverDriver.prepare_cover` tự điền ô `Exclude styles` (`instrumental, instrumental only, solo, saxophone solo, guitar solo, piano solo, horn solo, synth solo, long intro, long outro, extended instrumental break`) và khóa `continuous vocal melody throughout` trong `Styles` (`style_signature` nâng lên `v10`; nâng cấp tự động cả khi `preserve_style=True`).
+  - **Nhận diện thể loại AI (`_matches_selected_genre`):** Chấp nhận thẻ đầu chứa đúng tên thể loại đã chọn (như `"Slow acoustic ballad"` cho `Ballad`).
+- **Kiểm thử:** Chạy `unittest` trên `test_cover_style_prompt`, `test_genre_catalog`, `test_lyrics_repeats`, `test_suno_lyrics`, `test_suno_fast_fill`, `test_audio_only_mode`, `test_nct_source` — đạt 100%.
+- **An toàn vận hành:** Cổng `8100` đang có `cover-suno` ở trạng thái chờ người dùng bấm Create nên **tuyệt đối không restart backend** theo `AGENTS.md`. Đã cập nhật sẵn `lyrics_text`, `lyrics_suno_text` (9 khổ, 313 từ) và `suno_style_prompt` của `#178` trong DB; người dùng có thể dán ngay trên cửa sổ Suno đang mở hoặc dừng job → khởi động lại backend khi rảnh → bấm «↻ Làm lại trên Suno» (sẽ dùng lại ngay bài Editor đã lưu, không cần upload/chỉnh Tempo lại).
+
+## 2026-11-26 00:46 +07:00 — Sửa lỗi hát không hết lời và toàn nhạc solo (Sầu Tím Thiệp Hồng #178)
+
+- **Yêu cầu:** Xử lý lỗi bài **Sầu Tím Thiệp Hồng** (`SourceSong #178`, `Project #34`) hát không hết lời, phần lớn thời lượng biến thành nhạc dạo/solo.
+- **Nguyên nhân xác định (đo trực tiếp file gốc, 2 bản cover WAV và ảnh debug form Suno):**
+  1. **Thiếu gần nửa lời bài hát do trang nguồn chỉ chép 1 lượt:** Bản thu gốc `nhac_goc/Sầu Tím Thiệp Hồng - Lệ Quyên, Quang Lê.mp3` dài **288s (4p48s)**, trong đó từ `180.8s–267.4s` hát lặp lại toàn bộ nửa sau (`Hôm nay nhìn xe kết hoa… → Sầu dâng lên tím biết bao giờ cho khuây?` × 2, tổng **32 câu / 313 từ**). Tuy nhiên lời lấy từ NhacCuaTui chỉ có **20 câu / 196 từ** (0.68 từ/giây) và dính liền thành **1 khối duy nhất không dòng trống (`1 đoạn`)**, khiến Suno Cover (bám theo độ dài ~4p35s của bài Editor) bị lệch cấu trúc, chỉ hát 4 câu ở `90s–119.6s` rồi để trống 3,5 phút nhạc.
+  2. **Ô `Exclude styles` trên Suno bị bỏ trống + thiếu khóa `continuous vocal melody throughout`:** File `tempo 4.5x` sau khi lưu ở Editor được Suno tự gắn nhãn nội bộ là *"An electronic dance instrumental..."* (xem `create_form_ready_002545.png`). Khi `Styles` rút gọn ở `v9` bỏ cụm duy trì giọng hát xuyên suốt và không điền `Exclude styles` trong `More Options` (lại có thêm `subtle saxophone`), Suno v6 ưu tiên kéo dài đoạn dạo/solo nhạc cụ thay vì hát hết lời.
+  3. **Kiểm tra thể loại đầu ra AI quá chặt với thẻ ghép:** `genre_key(first_tag)` ưu tiên alias dài hơn (`"acoustic"` dài hơn `"ballad"`), làm các thẻ kiểu `"Slow acoustic ballad"` bị bác bỏ nhầm (`ValueError: AI không giữ đúng thể loại đã chọn` trong `_suno.log`).
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/cover/align.py`, `backend/cover/nct_jobs.py`, `backend/cover/suno_jobs.py`, `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/style_prompt.py`, `backend/video/config.py`, `tests/test_cover_style_prompt.py`, `tests/test_lyrics_repeats.py`, `AI_CHANGELOG.md` + cập nhật trực tiếp dữ liệu lời đầy đủ cho `SourceSong #178` trong `data/app.db` và file `.txt`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): đồng bộ `backend/cover/align.py`, `backend/cover/nct_jobs.py`, `backend/cover/suno_jobs.py`, `backend/cover/suno_lyrics.py`, `backend/cover/suno_cover.py`, `backend/cover/style_prompt.py`, `backend/video/config.py`.
+- **Trước → Sau:**
+  - **Khôi phục lời hát lặp từ bài gốc (`expand_source_lyrics_from_audio`):** Khi bài gốc dài `>= 140s` mà lời có mật độ `< 1.02 từ/giây`, tool tự đối chiếu audio bài gốc bằng Whisper + `expand_repeated_lyrics` để khôi phục đầy đủ các khổ/ĐK lặp sau nhạc dạo (giữ 100% chính tả chuẩn từ lời gốc, giải phóng VRAM ngay sau khi xong). Bài `#178 Sầu Tím Thiệp Hồng` đã được khôi phục từ `20 câu (196 từ, 1 đoạn)` lên **`32 câu (313 từ)`**.
+  - **Tự ngắt khổ 4 câu cho Suno (`normalize_for_suno`):** Bài lời dính liền 1 khối `>= 8` câu không có dòng trống được tự chia thành các khổ 4 câu cách nhau 1 dòng trống (`\n\n`) kèm `_` nối từ (bài `#178` thành **9 khổ chuẩn** thay vì 1 khối đặc).
+  - **Khóa `COVER_EXCLUSIONS` + `continuous vocal melody throughout`:** `CoverDriver.prepare_cover` tự điền ô `Exclude styles` (`instrumental, instrumental only, solo, saxophone solo, guitar solo, piano solo, horn solo, synth solo, long intro, long outro, extended instrumental break`) và khóa `continuous vocal melody throughout` trong `Styles` (`style_signature` nâng lên `v10`; nâng cấp tự động cả khi `preserve_style=True`).
+  - **Nhận diện thể loại AI (`_matches_selected_genre`):** Chấp nhận thẻ đầu chứa đúng tên thể loại đã chọn (như `"Slow acoustic ballad"` cho `Ballad`).
+- **Kiểm thử:** Chạy `unittest` trên `test_cover_style_prompt`, `test_genre_catalog`, `test_lyrics_repeats`, `test_suno_lyrics`, `test_suno_fast_fill`, `test_audio_only_mode`, `test_nct_source` — đạt 100%.
+- **An toàn vận hành:** Cổng `8100` đang có `cover-suno` ở trạng thái chờ người dùng bấm Create nên **tuyệt đối không restart backend** theo `AGENTS.md`. Đã cập nhật sẵn `lyrics_text`, `lyrics_suno_text` (9 khổ, 313 từ) và `suno_style_prompt` của `#178` trong DB; người dùng có thể dán ngay trên cửa sổ Suno đang mở hoặc dừng job → khởi động lại backend khi rảnh → bấm «↻ Làm lại trên Suno» (sẽ dùng lại ngay bài Editor đã lưu, không cần upload/chỉnh Tempo lại).
+
+## 2026-11-26 00:31 +07:00 — Chế độ Auto chỉ audio chạy kèm AI căn lời bài hát (.srt)
+
+- **Yêu cầu:** Ở chế độ `Auto chỉ audio` (`audio_only=True`), chuỗi tự động phải chạy luôn bước **Lời bài hát do AI căn lời** (Tab ③).
+- **Nguyên nhân:** Trước đây `_cover_chain` trong `backend/batch_service.py` và nhánh `audio_only` trong `backend/routers/tasks.py` dừng ngay sau khi master xong (với Track lẻ) hoặc chạy thẳng ghép Mix (với Mix Set) mà chưa gọi hàng đợi `backend/cover/jobs.py` (`AI căn lời`), dẫn đến các bản cover chưa có timeline lời căn thời gian và `nhac_mix/<project>.srt` không được tạo tự động khi Mix hoàn tất.
+- **File đã đổi:**
+  - Tool chính (`d:\Tools\Cover nhạc`): `backend/batch_service.py`, `backend/routers/tasks.py`, `backend/cover/jobs.py`, `backend/cover/lyrics_export.py`, `backend/cover/mastering.py`, `backend/routers/cover.py`, `backend/routers/projects.py`, `frontend/src/components/projects/ProjectFormModal.tsx`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`, `HUONG_DAN.md`, `tests/test_audio_only_mode.py`, `AI_CHANGELOG.md`.
+  - Bản `Cover Audio Tool` (`d:\Tools\Cover nhạc\Cover Audio Tool`): `backend/batch_service.py`, `backend/routers/tasks.py`, `backend/cover/jobs.py`, `backend/cover/lyrics_export.py`, `backend/cover/mastering.py`, `backend/routers/cover.py`, `backend/routers/projects.py`, `frontend/src/components/projects/ProjectFormModal.tsx`, `frontend/src/components/layout/TaskBar.tsx`, `frontend/dist/*`.
+- **Trước:**
+  - `Auto chỉ audio` chỉ làm tới `Suno Cover → master` (Track lẻ) hoặc `Suno Cover → master → ghép Mix` (Mix Set), bỏ qua Tab ③ **AI căn lời**.
+  - `_verify_audio` chỉ kiểm tra có file audio mà không kiểm tra trạng thái căn lời của `CoverSong`.
+  - `/api/tasks/active` và `_auto_wait_idle` chưa hiển thị/chờ hàng đợi `cover-align`.
+- **Sau:**
+  - Trong `_cover_chain` (`audio_only=True`), ngay sau khi loại bản thừa (Mix Set) và chờ `mastering` hoàn tất, hệ thống chạy `_align_project_lyrics`: đồng bộ `CoverSong`, chép lời/ca sĩ còn thiếu từ `SourceSong`, xếp hàng `backend.cover.jobs.submit`, chờ AI căn lời xong rồi xuất sẵn `.srt` cạnh file cover & file `_master` (`ban_cover/` và `ban_cover/mastered/`). Với Mix Set, căn lời hoàn tất **trước** `start_mix_for_project(..., force_video=False)` nên `export_mix_audio` tự động xuất cặp `nhac_mix/<project>.wav` + `nhac_mix/<project>.srt` (và nếu resume project đã có `mix.wav` sẵn thì cập nhật lại `.srt` ngay).
+  - Các bài đã có sẵn bản cover (`suno_status == "done"` kèm `CoverSong` hoặc `status == "manual"`) khi bấm `Auto chỉ audio` bỏ qua bước tải NCT/tempo/Suno và đi thẳng tới `master → AI căn lời → (ghép Mix)`.
+  - Nhánh `_auto_worker(..., audio_only=True)` cho project tải track thủ công (không có `SourceSong`) cũng tự động đồng bộ `CoverSong`, chạy AI căn lời + xuất `.srt` trước khi ghép Mix.
+  - `/api/tasks/active` và `TaskBar` hiển thị tiến trình `📝 AI căn lời bài hát` (bấm vào mở thẳng Tab ③ `Lời bài hát`); `_verify_audio` kiểm tra đủ cả file audio lẫn trạng thái căn lời của các `CoverSong` còn tồn tại trên đĩa.
+- **Kiểm thử:**
+  - `python -m unittest tests.test_audio_only_mode tests.test_cover_singles_batch tests.test_tasks_auto tests.test_lyrics_export tests.test_mix_export tests.test_nct_source tests.test_suno_lyrics -v` — **77 test đạt (OK)** (bao gồm 3 test mới kiểm tra Track lẻ `audio_only`, Mix Set `audio_only` căn lời trước Mix + xuất `nhac_mix/<tên>.srt`, và `_auto_worker` / `/api/tasks/active`).
+  - `npm run build` (`tsc -b && vite build`) thành công trên cả `frontend/` (Tool chính) và `Cover Audio Tool/frontend/`, kèm `py_compile` các module backend.
+- **Tồn đọng:** Không (chưa đẩy commit mới này lên GitHub vì chưa được yêu cầu; cả 2 cổng backend `8100`/`8200` hiện đang tắt nên lần mở tiếp theo sẽ nhận code mới ngay).
+
 ## 2026-11-09 00:24 +07:00 — Khôi phục tempo mặc định 4.5×
 
 - **Yêu cầu:** Hủy thay đổi 3× và quay lại nguyên trạng tăng tempo 4.5×.

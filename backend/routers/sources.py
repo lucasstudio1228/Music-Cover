@@ -52,8 +52,10 @@ def _covers_of(session: Session, project: Project) -> dict[int, list[dict]]:
         CoverSong.track_id == Track.id).order_by(CoverSong.position, CoverSong.id)).all()
     originals = {}
     for src in session.exec(select(SourceSong).where(SourceSong.project_id == project.id)).all():
-        # Cover được tạo từ bản đã đổi tempo nên QC cũng phải so với đúng bản đó.
-        candidate = src.tempo_file_path or src.file_path
+        # Suno Editor đã hạ nhịp bản tempo 4.5x về tốc độ gốc trước khi Cover,
+        # nên QC phải so độ dài bản cover với file bài gốc thật.
+        candidate = (src.file_path if src.file_path and Path(src.file_path).exists()
+                     else src.tempo_file_path)
         if candidate and Path(candidate).exists():
             originals[src.id] = candidate
     qc = cover_qc.evaluate(project.id, project.name,
@@ -85,7 +87,9 @@ def _source_out(src: SourceSong, covers: list[dict]) -> dict:
                        else "zingmp3" if "zingmp3.vn" in source_url
                        else "nhaccuatui" if "nhaccuatui.com" in source_url else "")
     from backend.cover.suno_lyrics import normalize_for_suno
-    suno_lyrics = normalize_for_suno(src.lyrics_text) if (src.lyrics_text or "").strip() else ""
+    cached_suno = (src.lyrics_suno_text or "").strip()
+    suno_lyrics = (cached_suno if cached_suno
+                   else (normalize_for_suno(src.lyrics_text) if (src.lyrics_text or "").strip() else ""))
     return {
         "id": src.id, "position": src.position, "query": src.query,
         "title": src.title, "artist": src.artist, "nct_url": src.nct_url,
@@ -226,6 +230,9 @@ def attach_cover_file(session: Session, project: Project, src: Optional[SourceSo
         raise HTTPException(400, f"Không đọc được file audio: {path.name}")
     track = _persist(session, project.id, core_track)
     session.flush()
+    # SQLite có thể cấp lại track.id của bản lỗi vừa xoá → xoá sạch cờ lỗi/số đo cũ
+    # của ID này trước khi gắn bản cover mới.
+    cover_qc.forget_tracks(project.id, project.name, [track.id])
     top = max([s.position for s in session.exec(select(CoverSong).where(
         CoverSong.project_id == project.id)).all()] + [0])
     session.add(CoverSong(
@@ -352,10 +359,11 @@ def update_source(source_id: int, data: SourceIn, session: Session = Depends(get
         if instrument != (src.featured_instrument or ""):
             # Ghi dấu riêng để nút «Tạo lại · Tempo» biết người dùng còn đổi
             # nhạc cụ. Không xóa prompt cũ: nó vẫn là bản đối chiếu và mọi dữ
-            # liệu khác vẫn giữ nguyên; worker chỉ viết lại Styles để áp dụng
-            # đúng lựa chọn nhạc cụ mới.
+            # liệu khác vẫn giữ nguyên; worker chỉ viết lại Styles + Lyrics thẻ
+            # để áp dụng đúng lựa chọn nhạc cụ mới.
             src.suno_style_signature = INSTRUMENT_STYLE_DIRTY
             src.suno_preserve_style = False
+            src.lyrics_suno_text = ""
     research = False
     if "query" in patch and src.status == MANUAL:
         raise HTTPException(400, "Bài tự nhập không tìm lại trên nhaccuatui.")
@@ -376,7 +384,9 @@ def update_source(source_id: int, data: SourceIn, session: Session = Depends(get
             research = True
     if "lyrics_text" in patch:
         src.lyrics_source = ""       # người dùng tự sửa/dán → lời của họ
-        src.lyrics_suno_text = ""    # bước 6 phải chạy lại theo lời mới
+        src.lyrics_suno_text = ""    # bước 6 / AI Music Director phải chạy lại theo lời mới
+        src.suno_style_signature = ""
+        src.suno_preserve_style = False
     if rejected_relyric:
         # Đã có lyrics thay thế hợp lệ → bài hết bị khoá, «Làm lại» được phép.
         src.suno_status, src.suno_error = "", None
@@ -561,9 +571,10 @@ def export_tempo(source_id: int, data: TempoIn,
 
     src.tempo_factor = factor
     src.tempo_file_path = str(exported)
-    # Tempo mới phải tạo Suno mới; không được tải lại song ID của tempo cũ.
+    # Tempo mới phải tạo Suno mới; không được tải lại song ID hay BPM Editor của tempo cũ.
     src.suno_song_ids = ""
     src.suno_editor_song_id = ""
+    src.suno_editor_bpm = 0
     has_covers = session.exec(select(CoverSong).where(CoverSong.source_id == src.id)).first()
     src.suno_status = "redo" if has_covers else ""
     src.suno_error = None
@@ -709,7 +720,8 @@ class MarkIn(BaseModel):
 def mark_cover(track_id: int, data: MarkIn, session: Session = Depends(get_session)):
     track, project = _cover_track(session, track_id)
     cover_qc.set_mark(project.id, project.name, track.id,
-                      flagged=data.flagged, dismissed=data.dismissed)
+                      flagged=data.flagged, dismissed=data.dismissed,
+                      file_path=track.filepath)
     return {"ok": True}
 
 
@@ -829,6 +841,7 @@ def set_cover_tempo(track_id: int, data: CoverTempoIn, session: Session = Depend
     session.add(track)
     session.add(song)
     session.commit()
+    cover_qc.rebind_file_key(project.id, project.name, track.id, str(src))
     if had_master:
         mastering.submit([src], log=_master_log(project), force=True, cfg=cfg)
     cover_qc.review_async(project.id)
@@ -936,10 +949,18 @@ def redo_cover(source_id: int, data: RedoIn, session: Session = Depends(get_sess
     src.suno_editor_song_id = ""
     session.add(src)
     session.commit()
+    cover_qc.forget_tracks(project.id, project.name, ids)
     reject_dir = nct_jobs.cover_dir(project.id, project.name) / REJECT_STEM
     moved = 0
     for p in files:
         try:
+            cover_tempo.drop_master(p)
+            for extra in (
+                p.with_suffix(".srt"),
+                cover_tempo.backup_path_for(p),
+                *(mp.with_suffix(".srt") for mp in mastering.master_paths(p, "both")),
+            ):
+                extra.unlink(missing_ok=True)
             if p.exists():
                 reject_dir.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(p), str(_unique(reject_dir / p.name)))
@@ -1166,8 +1187,8 @@ def get_suno_workflow():
 
 @router.put("/suno/workflow")
 def put_suno_workflow(data: SunoWorkflowIn):
-    """Bán thủ công: bạn tự chỉnh Tempo + Save as New Song và tự bấm Create; tool
-    làm phần còn lại. Áp dụng từ bài Suno kế tiếp (bài đang chạy giữ chế độ cũ)."""
+    """Bán thủ công: bạn tự chỉnh Tempo + Save as New Song trong Editor; sau đó
+    tool tự điền form, tự bấm Create, tải về, master và chuyển bước tiếp theo."""
     return suno_jobs.set_workflow(data.semi_manual)
 
 

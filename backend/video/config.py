@@ -1934,7 +1934,9 @@ SUNO_SELECTORS: dict[str, list[str]] = {
     # Exclude styles — nơi ghi 'no drums, no bass...' khi allow_*=False.
     "exclude_styles": [
         "input[placeholder='Exclude styles']",
-        "input[placeholder*='Exclude']",
+        "input[placeholder*='Exclude' i]",
+        "textarea[placeholder*='Exclude' i]",
+        "[role=textbox][aria-label*='Exclude' i]",
     ],
     # Duration: LUÔN Auto (người dùng chốt) — tool chỉ KIỂM (suno_driver.
     # ensure_duration_auto / _JS_DURATION_STATE), không bấm Custom.

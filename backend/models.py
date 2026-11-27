@@ -438,6 +438,9 @@ class SourceSong(SQLModel, table=True):
     # viết lại khi project đổi thể loại/mô tả/cover_style/giọng hát.
     suno_style_prompt: str = ""
     suno_style_signature: str = ""
+    # AI Music Director: Exclude Styles động và gói thông số JSON riêng từng bài.
+    suno_exclude_styles: str = ""
+    suno_director_json: str = ""
     # "" (người dùng tự dán) | Zing MP3 | NhacCuaTui | LRCLIB | Google/link web.
     lyrics_source: str = ""
     # queued | running | done | lyrics_only (có lời, chưa tải được file) |

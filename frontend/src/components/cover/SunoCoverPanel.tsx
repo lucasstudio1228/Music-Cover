@@ -47,9 +47,9 @@ const CREDITS_PER_SONG = 20;   // Suno: 1 lượt Create (ra 2 bản) ≈ 20 cre
 // Thông số tool tự đặt trên Suno (theo file workflow của người dùng — phần không lách bộ lọc).
 const SUNO_SETTINGS: [string, string][] = [
   ['Chế độ', 'Advanced · model v6'],
-  ['Cách làm', 'Đính file bài gốc → Cover'],
+  ['Cách làm', 'Upload bản tempo → Song Editor (điền Add Lyrics «_» + đồng bộ Styles AI + Tempo) → Remix → Cover'],
   ['Tên bài', 'Đúng tên bài gốc, KHÔNG kèm ca sĩ'],
-  ['Lyrics', 'Lời bài hát (tự chuẩn hoá & thay dấu cách bằng «_» để hát rõ chữ)'],
+  ['Lyrics & Styles', 'Tự chuẩn hoá lời nối «_» và đồng bộ cùng một prompt Styles AI cho cả Song Editor lẫn Cover'],
   ['Vocal Gender', 'Theo ca sĩ gốc (AI đoán — sửa được ở từng bài)'],
   ['Nhạc cụ sáng tạo', 'Mặc định bật → API AI tự chọn phù hợp; có thể tắt/chọn tay từng bài'],
   ['Duration', 'Auto'],
@@ -418,7 +418,7 @@ function SunoControls({ projectId, items, worker }:
       `${fresh ? 'TẠO MỚI/TẠO LẠI TỪ ĐẦU' : 'TIẾP TỤC'} cover trên Suno cho ${count} bài.\n\n`
       + `• Mỗi bài Suno ra 2 bản, tốn khoảng ${CREDITS_PER_SONG} credit → tổng tối đa khoảng ${count * CREDITS_PER_SONG} credit.\n`
       + (fresh ? '• Toàn bộ bài đủ dữ liệu sẽ chạy lại từ bước Editor; bản cover đã tải vẫn được giữ để so sánh.\n' : '• Tool giữ trạng thái đã lưu và chỉ chạy tiếp phần còn dở, không Create lại khi đã có ID Suno.\n')
-      + (semi ? '• Chế độ BÁN THỦ CÔNG: mỗi bài tool mở Suno Editor → BẠN chỉnh Tempo + bấm Save as New Song → tool điền lyrics/style/thông số → BẠN bấm Create → tool tải về, master và sang bài sau. Mỗi lần cần bạn, tool kêu «bíp».\n' : '')
+      + (semi ? '• Chế độ BÁN THỦ CÔNG: mỗi bài tool mở Suno Editor → BẠN chỉnh Tempo + bấm Save as New Song → sau đó tool tự điền đủ lyrics/style/thông số, tự bấm Create, tải về, master và chạy tiếp các bước sau.\n' : '')
       + '• Suno hiện captcha hoặc hỏi xác nhận quyền dùng bản ghi âm → tool kêu «bíp» và đưa cửa sổ Suno lên: bạn TỰ bấm, tool chờ rồi làm tiếp.\n'
       + '• Đừng tắt cửa sổ Suno khi tool đang chạy.\n\n'
       + 'Lần đầu nên bấm «🧪 Chạy thử» trước.',
@@ -445,8 +445,8 @@ function SunoControls({ projectId, items, worker }:
         <input type="checkbox" className="mt-0.5" checked={semi} disabled={workflow.isPending}
           onChange={(e) => workflow.mutate(e.target.checked, { onError: onErr })} />
         <span>
-          <b>✋ Bán thủ công</b> — tool mở Suno Editor, <b>bạn</b> chỉnh Tempo + bấm «Save as New Song»;
-          tool điền lyrics, style, thông số; <b>bạn</b> bấm Create; tool tải về, master và sang bài sau.
+          <b>✋ Bán thủ công</b> — tool mở Song Editor, tự điền sẵn <b>Add Lyrics («_»)</b> &amp; đồng bộ <b>Styles AI</b>,
+          rồi <b>bạn</b> chỉnh Tempo + bấm «Save as New Song»; sau đó tool tự Remix → Cover, điền đủ thông số, <b>tự bấm Create</b>, tải về, master và tiến hành các bước tiếp theo.
           {running && <span className="text-xs text-gray-400"> (đổi chế độ áp dụng từ bài kế tiếp)</span>}
         </span>
       </label>
@@ -570,10 +570,14 @@ function CoverTrash({ projectId, sourceId }: { projectId: number; sourceId: numb
 function SourceRow({ projectId, s, index, worker }:
   { projectId: number; s: SourceSong; index: number; worker?: SunoWorker }) {
   const one = useSunoOne(projectId);
+  const redoAll = useRedoCover(projectId);
   const exclude = useExcludeSource(projectId);
   const update = useUpdateSource(projectId);
   const [err, setErr] = useState<string | null>(null);
-  const onErr = (e: unknown) => setErr(errText(e));
+  const [okNote, setOkNote] = useState<string | null>(null);
+  const [editLyrics, setEditLyrics] = useState<string | null>(null);
+  const [savingAndRunning, setSavingAndRunning] = useState(false);
+  const onErr = (e: unknown) => { setOkNote(null); setErr(errText(e)); };
   const active = worker?.current === s.id || !!worker?.pending.includes(s.id);
   const loginOpen = worker?.mode === 'login';
   const badge = SUNO_BADGE[s.suno_status];
@@ -747,7 +751,7 @@ function SourceRow({ projectId, s, index, worker }:
             <button className={btnSm} disabled={!canSuno || one.isPending}
               title={!ready(s) ? 'Cần file bài gốc + bản tempo đã xuất + lời trước' : ''}
               onClick={() => go({ fresh: true, editorBpm: redoBpm ? Number(redoBpm) : undefined,
-                                  tempoOnly: !!redoBpm, authorizedLyrics: rejected || undefined },
+                                  tempoOnly: false, authorizedLyrics: rejected || undefined },
                 `${rejected ? '⚠ Lần trước Suno báo lyrics bài này có bản quyền. Chỉ làm lại khi lyrics đã thay bằng nội dung bạn tự sáng tác hoặc được phép sử dụng.\n\n' : ''}Làm mới/làm lại cover «${name}»${redoBpm ? ` với Tempo ${redoBpm} BPM` : ' với Tempo mặc định theo thể loại'} trên Suno?\nSuno ra 2 bản, tốn khoảng ${CREDITS_PER_SONG} credit.`)}>
               {done ? '➕ Làm thêm trên Suno' : s.covers.length || s.suno_status ? '↻ Làm lại trên Suno' : '▶ Làm trên Suno'}
             </button>
@@ -757,6 +761,16 @@ function SourceRow({ projectId, s, index, worker }:
               🧪 Chạy thử
             </button>
           </>
+        )}
+        {!active && (
+          <button className={btnSm}
+            onClick={() => {
+              setOkNote(null);
+              setEditLyrics(editLyrics === null ? s.lyrics_text : null);
+            }}
+            title="Sửa trực tiếp lời bài hát bị sai và bấm Làm lại trên Suno ngay tại đây">
+            📝 {editLyrics !== null ? 'Đóng sửa lời' : 'Sửa lời & Làm lại'}
+          </button>
         )}
         {!active && (
           <button className={btnSm} disabled={!worker || loginOpen || one.isPending}
@@ -791,6 +805,91 @@ function SourceRow({ projectId, s, index, worker }:
           </button>
         )}
       </div>
+      {editLyrics !== null && (
+        <div className="mt-2 space-y-2 pl-8">
+          <textarea
+            className="h-48 w-full rounded-lg border border-white/10 bg-surface-2 px-3 py-1.5 font-mono text-xs text-gray-100 outline-none focus:border-accent"
+            value={editLyrics}
+            onChange={(e) => setEditLyrics(e.target.value)}
+            placeholder="Mỗi câu 1 dòng"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-40"
+              disabled={update.isPending || savingAndRunning}
+              onClick={() => {
+                if (rejected && !window.confirm('Suno đã từ chối lyrics cũ của bài này.\nXác nhận lyrics mới là nội dung bạn tự sáng tác hoặc có quyền sử dụng?')) return;
+                setErr(null);
+                setOkNote(null);
+                update.mutate({
+                  id: s.id,
+                  lyrics_text: editLyrics.normalize('NFC'),
+                  authorized_lyrics: rejected || undefined,
+                }, {
+                  onSuccess: () => {
+                    setEditLyrics(null);
+                    setOkNote('✅ Đã lưu lời mới.');
+                  },
+                  onError: onErr,
+                });
+              }}
+            >
+              Lưu lời
+            </button>
+            <button
+              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+              disabled={update.isPending || savingAndRunning || active || loginOpen || !ready({ ...s, lyric_line_count: editLyrics.trim() ? 1 : 0 })}
+              title="Lưu lời mới, cất bản cover cũ (nếu có) sang ban_cover\\_loi và chạy lại trên Suno theo lời mới"
+              onClick={async () => {
+                if (rejected && !window.confirm('Suno đã từ chối lyrics cũ của bài này.\nXác nhận lyrics mới là nội dung bạn tự sáng tác hoặc có quyền sử dụng?')) return;
+                if (s.covers.length > 0 && !window.confirm(
+                  `Lưu lời mới và làm lại «${name}» trên Suno?\n\n`
+                  + `• ${s.covers.length} bản cover cũ sẽ được cất vào thư mục ban_cover\\_loi (không xoá file) và xoá báo lỗi cũ.\n`
+                  + '• AI Music Director sẽ phân tích lại lời mới và tạo 2 bản cover mới trên Suno.',
+                )) return;
+                setErr(null);
+                setOkNote(null);
+                setSavingAndRunning(true);
+                try {
+                  await update.mutateAsync({
+                    id: s.id,
+                    lyrics_text: editLyrics.normalize('NFC'),
+                    authorized_lyrics: rejected || undefined,
+                  });
+                  if (s.covers.length > 0) {
+                    await redoAll.mutateAsync({
+                      id: s.id,
+                      trackIds: s.covers.map((c) => c.track_id),
+                      editorBpm: redoBpm ? Number(redoBpm) : undefined,
+                      tempoOnly: false,
+                    });
+                  } else {
+                    await one.mutateAsync({
+                      id: s.id,
+                      fresh: true,
+                      editorBpm: redoBpm ? Number(redoBpm) : undefined,
+                      tempoOnly: false,
+                      authorizedLyrics: rejected || undefined,
+                    });
+                  }
+                  setEditLyrics(null);
+                  setOkNote('✅ Đã lưu lời mới và xếp vào hàng đợi làm lại trên Suno.');
+                } catch (e) {
+                  onErr(e);
+                } finally {
+                  setSavingAndRunning(false);
+                }
+              }}
+            >
+              {savingAndRunning ? '⏳ Đang xếp hàng Suno…' : '💾 Lưu lời & ↻ Làm lại trên Suno'}
+            </button>
+            <button className={btnSm} disabled={savingAndRunning} onClick={() => setEditLyrics(null)}>
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
+      {okNote && <p className="mt-1 pl-8 text-xs text-emerald-300">{okNote}</p>}
       {err && <p className="mt-1 pl-8 text-xs text-red-400">{err}</p>}
       {s.covers.length > 0 && (
         <div className="mt-2 space-y-1.5 pl-8">

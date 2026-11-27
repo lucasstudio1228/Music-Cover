@@ -416,6 +416,232 @@ def quality_report(lines: list[dict]) -> dict:
             "ok": bad <= max(1, len(lines) // 10)}
 
 
+def _distribute_lines_in_span(texts: list[str], span_start: float, span_end: float,
+                              vocal_regions: list[tuple[float, float]] | None = None
+                              ) -> list[dict]:
+    """Dự phòng khi Whisper không trả đủ số câu trên đoạn hẹp: chia tỷ lệ theo số từ
+    trên các vùng có giọng hát (hoặc đều trên cả khoảng nếu không tách được vùng)."""
+    if not texts:
+        return []
+    total_span = max(span_end - span_start, 0.05 * len(texts))
+    weights = [max(1, len(t.split())) for t in texts]
+    total_w = sum(weights)
+    regions = []
+    for r0, r1 in (vocal_regions or []):
+        a0, a1 = max(r0, span_start), min(r1, span_end)
+        if a1 - a0 >= 0.4:
+            regions.append((a0, a1))
+    voiced_len = sum(r1 - r0 for r0, r1 in regions)
+    use_regions = len(regions) > 0 and voiced_len >= min(total_span * 0.35, 2.0)
+
+    def map_pos(frac: float) -> float:
+        if not use_regions:
+            return span_start + frac * total_span
+        target = frac * voiced_len
+        acc = 0.0
+        for r0, r1 in regions:
+            seg_len = r1 - r0
+            if acc + seg_len >= target - 1e-6:
+                return r0 + min(seg_len, max(0.0, target - acc))
+            acc += seg_len
+        return regions[-1][1]
+
+    out: list[dict] = []
+    acc_w = 0
+    for text, w in zip(texts, weights):
+        f0 = acc_w / total_w
+        acc_w += w
+        f1 = acc_w / total_w
+        t0 = map_pos(f0)
+        t1 = max(map_pos(f1), t0 + 0.15)
+        out.append({"text": text, "start": round(t0, 3), "end": round(min(t1, span_end), 3)})
+    return out
+
+
+def _repair_collapsed_runs(
+    placed: list[dict],
+    span_lo: float,
+    span_hi: float,
+    vocal_regions: list[tuple[float, float]] | None = None,
+) -> list[dict]:
+    """Sửa cụm câu bị Whisper gom chụm (< 0.4s/câu hoặc chồng sát nhau) ngay cạnh
+    khoảng trống có giọng hát (thường xảy ra ở các câu ngay sau đoạn nhạc dạo giữa)."""
+    if len(placed) < 2:
+        return placed
+    out = [dict(x) for x in placed]
+    m = len(out)
+
+    def _is_collapsed(idx: int) -> bool:
+        dur = float(out[idx]["end"]) - float(out[idx]["start"])
+        if dur < 0.4:
+            return True
+        if idx + 1 < m and float(out[idx + 1]["start"]) - float(out[idx]["start"]) < 0.35:
+            return True
+        if idx > 0 and float(out[idx]["start"]) - float(out[idx - 1]["start"]) < 0.35:
+            return True
+        return False
+
+    i = 0
+    while i < m:
+        if not _is_collapsed(i):
+            i += 1
+            continue
+        j = i
+        while j + 1 < m and _is_collapsed(j + 1):
+            j += 1
+        avail_lo = float(out[i - 1]["end"]) if i > 0 else span_lo
+        avail_hi = float(out[j + 1]["start"]) if j + 1 < m else span_hi
+        count = j - i + 1
+        if avail_hi - avail_lo >= max(1.2, 0.7 * count):
+            repaired = _distribute_lines_in_span(
+                [out[k]["text"] for k in range(i, j + 1)],
+                avail_lo,
+                avail_hi,
+                vocal_regions,
+            )
+            for offset, row in enumerate(repaired):
+                out[i + offset] = row
+        i = j + 1
+    return out
+
+
+def align_between_anchors(track_id: int, audio_path: str, lines: list[dict],
+                          anchor_indices: list[int] | None = None,
+                          language: str = "vi", model_name: str = "large-v3",
+                          log: Log = None) -> list[dict]:
+    """Giữ cố định các câu mốc (mặc định: câu đầu 0 và câu cuối N-1), dùng AI căn
+    lại tất cả các câu nằm giữa trên đúng khoảng thời gian vocal của đoạn đó."""
+    if len(lines) < 3:
+        raise ValueError("Cần ít nhất 3 câu lời để căn lại phần giữa.")
+    cleaned: list[dict] = []
+    for idx, item in enumerate(lines):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            raise ValueError(f"Câu số {idx + 1} đang trống — hãy điền chữ hoặc xoá dòng trống.")
+        start = float(item.get("start") or 0.0)
+        end = float(item.get("end") or (start + 2.0))
+        if start < 0:
+            start = 0.0
+        if end <= start:
+            end = start + 2.0
+        cleaned.append({"text": text, "start": round(start, 3), "end": round(end, 3)})
+
+    n = len(cleaned)
+    anchors = sorted({0, n - 1, *(i for i in (anchor_indices or []) if 0 <= i < n)})
+    for prev_i, next_i in zip(anchors, anchors[1:]):
+        if cleaned[next_i]["start"] <= cleaned[prev_i]["start"] + 0.2:
+            raise ValueError(
+                f"Mốc Bắt đầu của câu #{next_i + 1} ({cleaned[next_i]['start']:.1f}s) phải lớn hơn "
+                f"câu #{prev_i + 1} ({cleaned[prev_i]['start']:.1f}s).")
+
+    vocals = separate_vocals(track_id, audio_path, log)
+    audio = _load_mono16k(vocals)
+    total_dur = len(audio) / WHISPER_SR if len(audio) else 0.0
+    detected_language = _lyrics_language(language, [x["text"] for x in cleaned])
+    all_vocal_regions = _vocal_regions(audio)
+    model = _get_whisper(model_name, log)
+
+    out = [dict(x) for x in cleaned]
+    for prev_i, next_i in zip(anchors, anchors[1:]):
+        if next_i - prev_i <= 1:
+            if out[prev_i]["end"] > out[next_i]["start"]:
+                out[prev_i]["end"] = round(max(out[prev_i]["start"] + 0.15,
+                                               out[next_i]["start"]), 3)
+            continue
+
+        left = out[prev_i]
+        right = out[next_i]
+        mid_indices = list(range(prev_i + 1, next_i))
+        mid_texts = [out[k]["text"] for k in mid_indices]
+        left_dur = left["end"] - left["start"]
+        joint_left = left_dur < 0.4 or left_dur > 15.0 or left["end"] >= right["start"] - 0.3
+
+        _say(log, f"AI đang căn lại {len(mid_texts)} câu giữa câu #{prev_i + 1} "
+                  f"({left['start']:.1f}s) và câu #{next_i + 1} ({right['start']:.1f}s)…")
+
+        if not joint_left:
+            win_start = left["end"]
+            win_end = right["start"]
+            s0 = max(0, min(len(audio), int(round(win_start * WHISPER_SR))))
+            s1 = max(s0, min(len(audio), int(round(win_end * WHISPER_SR))))
+            segs: list[dict] = []
+            if s1 - s0 >= int(0.4 * WHISPER_SR):
+                res = model.align(audio[s0:s1], "\n".join(mid_texts),
+                                  language=detected_language, original_split=True)
+                segs = _segments(res) if res is not None else []
+            if len(segs) == len(mid_texts):
+                placed = []
+                for text, seg in zip(mid_texts, segs):
+                    st = win_start + float(seg["start"])
+                    en = win_start + float(seg["end"])
+                    for r0, r1 in all_vocal_regions:
+                        if r0 - 0.5 <= st <= r1 + 0.5:
+                            en = min(en, r1)
+                            break
+                    placed.append({"text": text, "start": st, "end": max(en, st + 0.15)})
+            else:
+                placed = _distribute_lines_in_span(
+                    mid_texts, win_start, win_end, all_vocal_regions)
+            span_lo, span_hi = win_start, win_end
+        else:
+            # Người dùng mới chấm giờ Bắt đầu của câu đầu mà chưa chỉnh giờ Kết thúc:
+            # căn chung [câu đầu + phần giữa] trên [left.start .. right.start], giữ cố định left.start.
+            win_start = left["start"]
+            win_end = right["start"]
+            s0 = max(0, min(len(audio), int(round(win_start * WHISPER_SR))))
+            s1 = max(s0, min(len(audio), int(round(win_end * WHISPER_SR))))
+            joint_texts = [left["text"], *mid_texts]
+            segs = []
+            if s1 - s0 >= int(0.6 * WHISPER_SR):
+                res = model.align(audio[s0:s1], "\n".join(joint_texts),
+                                  language=detected_language, original_split=True)
+                segs = _segments(res) if res is not None else []
+            if len(segs) == len(joint_texts):
+                left_end = win_start + float(segs[0]["end"])
+                left_end = min(max(left_end, left["start"] + 0.4), win_end - 0.2)
+                out[prev_i]["end"] = round(left_end, 3)
+                placed = []
+                for text, seg in zip(mid_texts, segs[1:]):
+                    st = max(left_end, win_start + float(seg["start"]))
+                    en = win_start + float(seg["end"])
+                    for r0, r1 in all_vocal_regions:
+                        if r0 - 0.5 <= st <= r1 + 0.5:
+                            en = min(en, r1)
+                            break
+                    placed.append({"text": text, "start": st, "end": max(en, st + 0.15)})
+                span_lo, span_hi = left_end, win_end
+            else:
+                est_left_end = min(left["start"] + 2.5,
+                                   left["start"] + (win_end - win_start) / (len(mid_texts) + 1))
+                out[prev_i]["end"] = round(max(est_left_end, left["start"] + 0.3), 3)
+                span_lo, span_hi = out[prev_i]["end"], win_end
+                placed = _distribute_lines_in_span(
+                    mid_texts, span_lo, span_hi, all_vocal_regions)
+
+        placed = _repair_collapsed_runs(placed, span_lo, span_hi, all_vocal_regions)
+
+        # Khử chồng lấn cục bộ trong đoạn giữa nhưng TUYỆT ĐỐI giữ nguyên mốc câu neo.
+        min_step = min(0.25, max(0.05, (span_hi - span_lo) / max(len(placed) * 3, 1)))
+        starts: list[float] = []
+        cursor = span_lo
+        for idx_in_mid, row in enumerate(placed):
+            max_start = span_hi - min_step * (len(placed) - idx_in_mid)
+            st = min(max(float(row["start"]), cursor), max_start)
+            starts.append(st)
+            cursor = st + min_step
+        for idx_in_mid, row in enumerate(placed):
+            st = starts[idx_in_mid]
+            nxt_limit = starts[idx_in_mid + 1] if idx_in_mid + 1 < len(placed) else span_hi
+            en = min(max(float(row["end"]), st + min_step), max(nxt_limit, st + min_step), span_hi)
+            out[mid_indices[idx_in_mid]] = {
+                "text": row["text"], "start": round(st, 3), "end": round(en, 3),
+            }
+
+    if total_dur > 0 and out[-1]["end"] > total_dur:
+        out[-1]["end"] = round(max(total_dur, out[-1]["start"] + 0.3), 3)
+    return out
+
+
 def process_song(track_id: int, audio_path: str, lyrics: list[str], language: str,
                  model_name: str = "large-v3", log: Log = None) -> list[dict]:
     """Trọn quy trình 1 bài: tách giọng → căn (có lời) hoặc chép lời (không lời)."""
@@ -423,3 +649,58 @@ def process_song(track_id: int, audio_path: str, lyrics: list[str], language: st
     if lyrics:
         return align_lines(vocals, lyrics, language, model_name, log)
     return transcribe(vocals, language, model_name, log)
+
+
+def expand_source_lyrics_from_audio(audio_path: str | Path, lyrics_text: str,
+                                    model_name: str = "large-v3",
+                                    log: Log = None) -> str:
+    """Khôi phục đoạn ĐK/khổ hát lặp bị trang lời nhạc viết lược 1 lượt.
+
+    Nhiều bài Bolero/Ballad dài 4–5 phút hát lặp lại ĐK + khổ cuối sau nhạc dạo
+    giữa, nhưng lời trên NCT/Zing chỉ chép 1 lượt (~180–200 từ cho bài 280s) làm
+    Suno Cover thiếu chữ để hát và biến phần còn lại thành nhạc solo.
+    Hàm chỉ chạy khi bài gốc >= 140s mà mật độ chữ < 1.02 từ/giây; chữ trả về
+    luôn lấy nguyên văn từ ``lyrics_text`` đã xác minh, không lấy chính tả ASR.
+    """
+    from .lyrics import clean_lyrics
+    path = Path(audio_path)
+    if not path.is_file():
+        return lyrics_text
+    try:
+        import soundfile as sf
+        duration = float(sf.info(str(path)).duration)
+    except Exception:
+        return lyrics_text
+    if duration < 140.0:
+        return lyrics_text
+    lines = clean_lyrics(lyrics_text)
+    if len(lines) < 4:
+        return lyrics_text
+    words = sum(len(line.split()) for line in lines)
+    if words / duration >= 1.02:
+        return lyrics_text
+
+    _say(log, f"Lời bài hát có {words} từ / {duration:.0f}s — đang đối chiếu bài gốc "
+              "để khôi phục đoạn hát lặp sau nhạc dạo…")
+    try:
+        audio = _load_mono16k(str(path))
+        lang = _lyrics_language("vi", lines)
+        model = _get_whisper(model_name, log)
+        heard = model.transcribe(audio, language=lang, vad=True,
+                                 regroup=True, verbose=None)
+        expanded = expand_repeated_lyrics(
+            lines, _segments(heard), vocal_regions=_vocal_regions(audio))
+        if len(expanded) > len(lines):
+            _say(log, f"Đã khôi phục đoạn hát lặp từ bài gốc: {len(lines)} → "
+                      f"{len(expanded)} câu ({sum(len(x.split()) for x in expanded)} từ).")
+            return "\n".join(expanded)
+    except Exception as exc:
+        _say(log, f"Không dò được đoạn lặp từ bài gốc ({type(exc).__name__}) — giữ nguyên lời.")
+    finally:
+        try:
+            from . import jobs as align_jobs
+            if not align_jobs.any_busy():
+                release_models()
+        except Exception:
+            pass
+    return lyrics_text

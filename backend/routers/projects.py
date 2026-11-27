@@ -240,7 +240,7 @@ async def create_mixset(
     audio_only: bool = Form(False),
 ):
     """Một danh sách bài → một project Mix Set → cover/mix/video/YouTube draft.
-    audio_only=True: chỉ làm audio (cover → master → mix), không dựng video."""
+    audio_only=True: chỉ làm audio (cover → master → AI căn lời → mix), không dựng video."""
     from backend import batch_service
     try:
         lines = _read_mixset_lines(file.filename or "", await file.read())
@@ -268,7 +268,7 @@ async def create_singles(
     audio_only: bool = Form(False),
 ):
     """Một danh sách bài → MỖI BÀI một project Track lẻ (ảnh bìa + video riêng).
-    audio_only=True: mỗi bài dừng sau khi master xong, không dựng video."""
+    audio_only=True: mỗi bài dừng sau khi master + AI căn lời xong, không dựng video."""
     from backend import batch_service
     try:
         lines = _read_mixset_lines(file.filename or "", await file.read())

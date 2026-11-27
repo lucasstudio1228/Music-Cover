@@ -13,7 +13,7 @@ from typing import Callable
 
 from .music_line import FOREIGN_GENRE_WORDS, LINE_ALLOWED_WORDS, line_profile
 from .suno_cover import cover_styles_for_project, lyrics_lock
-from .genre_catalog import canonical_genre_context, genre_key
+from .genre_catalog import GENRE_PROFILES, canonical_genre_context, genre_key
 
 MAX_STYLES_CHARS = 1000
 # 2026-11-25: Styles là danh sách thẻ ngắn (~150–300 ký tự). Phần AI chỉ viết
@@ -22,7 +22,8 @@ MIN_STYLES_CHARS = 30
 MAX_AI_STYLES_CHARS = 300
 _FALLBACK_MODEL = "gpt-4o-mini"
 NO_CREATIVE_INSTRUMENT = "__no_creative_instrument__"
-_VOCAL_FIRST_SUFFIX = "no instrumental solo"
+_VOCAL_CONTINUITY = "continuous vocal melody throughout"
+_VOCAL_FIRST_SUFFIX = f"{_VOCAL_CONTINUITY}, no instrumental solo"
 
 
 def style_signature(music_style: str, description: str, cover_style: str,
@@ -44,7 +45,8 @@ def style_signature(music_style: str, description: str, cover_style: str,
         # v8: auto nhạc cụ là lựa chọn quyết định theo genre; khóa nhịp/attack để
         # không sinh tiếng gõ, stab hoặc fill lệch phách.
         # v9: Styles rút gọn thành thẻ ngắn — prompt dài cũ phải viết lại.
-        "version": 9,
+        # v10: khóa thêm continuous vocal melody throughout + Exclude styles chống solo.
+        "version": 10,
     }, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
@@ -78,7 +80,14 @@ def enforce_vocal_first_styles(text: str) -> str:
     for idx, phrase in enumerate(protected):
         base = base.replace(f"__NO_SOLO_{idx}__", phrase)
     base = re.sub(r"(?:,\s*){2,}", ", ", base).strip(" ,.;")
-    if re.search(r"\bno instrumental solos?\b", base, re.I):
+    m_no_solo = re.search(r"\bno instrumental solos?\b", base, re.I)
+    if m_no_solo:
+        if "continuous" not in base.casefold():
+            before = base[:m_no_solo.start()].rstrip(" ,.;")
+            after = base[m_no_solo.start():].rstrip(" ,.;")
+            joined = f"{before}, {_VOCAL_CONTINUITY}, {after}" if before else f"{_VOCAL_CONTINUITY}, {after}"
+            if len(joined) <= MAX_STYLES_CHARS:
+                return joined
         return base[:MAX_STYLES_CHARS].rstrip(" ,.;")
     # Prompt bản cũ có đuôi «vocal-led arrangement, …» → bỏ đuôi rồi nối thẻ mới.
     at = base.casefold().find("vocal-led arrangement")
@@ -107,6 +116,25 @@ def _wrong_regions(text: str, line: dict, lyrics_lang: str) -> list[str]:
     ok = f"{line.get('people', '')} {line.get('label', '')} {lyrics_lang}".casefold()
     return [w for w in ("vietnamese", "chinese", "japanese", "korean", "thai")
             if re.search(rf"(?<![a-z]){w}(?![a-z])", low) and w not in ok]
+
+
+def _matches_selected_genre(first_tag: str, full_styles: str, selected_key: str) -> bool:
+    """Chấp nhận cả trường hợp thẻ đầu là «Slow acoustic ballad» khi chọn Ballad."""
+    if (genre_key(first_tag) or genre_key(full_styles)) == selected_key:
+        return True
+    profile = GENRE_PROFILES.get(selected_key)
+    if not profile:
+        return False
+    folded_head = unicodedata.normalize("NFKD", (first_tag or "").casefold()).replace("đ", "d")
+    folded_head = re.sub(r"[^a-z0-9&]+", " ",
+                         "".join(c for c in folded_head if not unicodedata.combining(c))).strip()
+    if selected_key == "house" and any(x in folded_head for x in ("deep house", "future house", "tropical house")):
+        return False
+    for alias in profile["aliases"]:
+        fa = re.sub(r"[^a-z0-9&]+", " ", alias.casefold()).strip()
+        if fa and re.search(rf"(?<![a-z0-9]){re.escape(fa)}(?![a-z0-9])", folded_head):
+            return True
+    return False
 
 
 def _valid_styles(text: str) -> bool:
@@ -290,7 +318,7 @@ def generate_cover_styles(music_style: str, description: str = "",
         # thì tên nhạc cụ «acoustic guitar» bị nhận nhầm là thể loại Acoustic →
         # Ballad nào cũng bị loại.
         first_tag = styles.split(",", 1)[0]
-        if selected_key and (genre_key(first_tag) or genre_key(styles)) != selected_key:
+        if selected_key and not _matches_selected_genre(first_tag, styles, selected_key):
             raise ValueError("AI không giữ đúng thể loại đã chọn")
         # Chỉ genre người dùng chọn mới được cấp quyền xuất hiện. Dòng nhạc và
         # mô tả dự án không được vô tình bật thêm Latin/K-pop/bolero/... như

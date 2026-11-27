@@ -154,6 +154,19 @@ class CoverStylePromptTests(unittest.TestCase):
         self.assertIn("API key bị từ chối", joined)
         self.assertNotIn("sk-ABC123", joined)
 
+    def test_slow_acoustic_ballad_head_tag_still_matches_ballad(self):
+        from backend.cover.suno_cover import COVER_EXCLUSIONS
+        raw = ("Slow acoustic ballad, 70 BPM, gentle 4/4 pulse, warm piano, "
+               "soft strings, sentimental mood")
+        client, _ = _client_returning(raw)
+        with mock.patch("openai.OpenAI", return_value=client):
+            styles, source = generate_cover_styles("Ballad", api_config=_Config())
+        self.assertEqual(source, "ai")
+        self.assertIn("continuous vocal melody throughout", styles)
+        self.assertTrue(styles.endswith("no instrumental solo"))
+        self.assertIn("saxophone solo", COVER_EXCLUSIONS)
+        self.assertIn("instrumental", COVER_EXCLUSIONS)
+
 
 if __name__ == "__main__":
     unittest.main()

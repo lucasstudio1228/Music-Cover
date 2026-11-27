@@ -221,9 +221,8 @@ def note_lyrics_activity(project_id: int) -> None:
         params = json.loads(run.params_json or "{}")
         if params.get("kind") not in _COVER_KINDS:
             return
-        missing = [s for s in _batch_sources(session, project.batch_id)
-                   if s.status not in _INACTIVE_SOURCE]
-        has_missing = any(not (s.lyrics_text or "").strip() for s in missing)
+        has_missing = any(_is_missing_lyrics(s)
+                          for s in _batch_sources(session, project.batch_id))
     if has_missing:
         _schedule_auto_skip(project.batch_id)
     else:
@@ -231,7 +230,10 @@ def note_lyrics_activity(project_id: int) -> None:
 
 
 def restore_pending_lyrics_timers() -> None:
-    """Khôi phục đồng hồ 5 phút sau khi backend khởi động lại."""
+    """Khôi phục đồng hồ 5 phút sau khi backend khởi động lại.
+    CHỈ khôi phục cho lô thực sự đang chờ bổ sung lyrics (có cờ lyrics_auto_skip_at
+    hoặc lyrics_resume_pending), TUYỆT ĐỐI không bật hẹn giờ cho các bài còn đang
+    xếp hàng chưa tải (status = queued/running/stopped)."""
     now = _now()
     with Session(engine) as session:
         runs = session.exec(select(BatchRun).where(
@@ -244,21 +246,23 @@ def restore_pending_lyrics_timers() -> None:
             if params.get("lyrics_resume_pending"):
                 pending.append((run.batch_key, 0.1, False))
                 continue
+            raw = params.get("lyrics_auto_skip_at")
+            if not raw:
+                continue
             sources = [s for s in _batch_sources(session, run.batch_key)
                        if s.status not in _INACTIVE_SOURCE]
             if not sources:
                 continue
-            if not any(not (s.lyrics_text or "").strip() for s in sources):
+            if not any(_is_missing_lyrics(s) for s in sources):
                 continue
-            raw = params.get("lyrics_auto_skip_at")
             try:
-                deadline = datetime.fromisoformat(raw) if raw else None
-                if deadline and deadline.tzinfo is None:
+                deadline = datetime.fromisoformat(raw)
+                if deadline.tzinfo is None:
                     deadline = deadline.replace(tzinfo=timezone.utc)
-                delay = max(0.1, (deadline - now).total_seconds()) if deadline else _LYRICS_WAIT_SECONDS
+                delay = max(0.1, (deadline - now).total_seconds())
             except (TypeError, ValueError):
                 delay = _LYRICS_WAIT_SECONDS
-            pending.append((run.batch_key, delay, bool(raw)))
+            pending.append((run.batch_key, delay, True))
     for key, delay, preserve in pending:
         if delay <= 0.1 and not preserve:
             _schedule_resume_after_skip(key, delay)
@@ -295,8 +299,7 @@ def get_batch(batch_key: str) -> Optional[dict]:
             out["missing_lyrics"] = [
                 {"source_id": s.id, "project_id": s.project_id,
                  "query": s.query, "title": s.title, "artist": s.artist}
-                for s in missing if s.status not in ("skipped_no_lyrics", "excluded")
-                and not (s.lyrics_text or "").strip()
+                for s in missing if _is_missing_lyrics(s)
             ]
         # DB ghi "running" nhưng thread orchestrator đã chết (server khởi động
         # lại giữa chừng) → báo "interrupted" để UI hiện nút Tiếp tục lô.
@@ -565,7 +568,15 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
 
     with Session(engine) as session:
         sources = [session.get(SourceSong, sid) for sid in source_ids]
-        nct_ids = [s.id for s in sources if s and
+        need_cover: set[int] = set()
+        for s in sources:
+            if not s or s.status in _INACTIVE_SOURCE:
+                continue
+            has_cover = session.exec(select(CoverSong).where(
+                CoverSong.source_id == s.id)).first() is not None
+            if (s.suno_status != "done" or not has_cover) and s.status != "manual":
+                need_cover.add(s.id)
+        nct_ids = [s.id for s in sources if s and s.id in need_cover and
                    (not s.file_path or not Path(s.file_path).is_file()
                     or not (s.lyrics_text or "").strip())]
     if nct_ids:
@@ -573,47 +584,52 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
         if not _wait_cover_worker(batch_key, nct_jobs.status, ev, 4 * 3600,
                                   "Đang tải bài gốc", prefix):
             raise RuntimeError("Dừng/hết giờ khi tải bài gốc.")
-    with Session(engine) as session:
-        project = session.get(Project, project_id)
-        sources = [session.get(SourceSong, sid) for sid in source_ids]
-        missing_lyrics = [s for s in sources if s and s.status not in _INACTIVE_SOURCE
-                          and not (s.lyrics_text or "").strip()]
-        if missing_lyrics:
-            for src in missing_lyrics:
-                src.status = "skipped_no_lyrics"
-                src.error = ("Không tìm được lyrics — tự loại khỏi Mix Set, "
-                             "không đưa sang Suno Cover.")
-                src.tempo_factor, src.tempo_file_path = 1.0, ""
-                session.add(src)
+    if need_cover:
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            sources = [session.get(SourceSong, sid) for sid in source_ids]
+            missing_lyrics = [s for s in sources if s and s.id in need_cover
+                              and s.status not in _INACTIVE_SOURCE
+                              and not (s.lyrics_text or "").strip()]
+            if missing_lyrics:
+                for src in missing_lyrics:
+                    src.status = "skipped_no_lyrics"
+                    src.error = ("Không tìm được lyrics — tự loại khỏi Mix Set, "
+                                 "không đưa sang Suno Cover.")
+                    src.tempo_factor, src.tempo_file_path = 1.0, ""
+                    session.add(src)
+                session.commit()
+                say(f"Đã tự loại {len(missing_lyrics)} bài không tìm được lyrics.")
+            active_sources = [s for s in sources if s and s.status not in _INACTIVE_SOURCE]
+            if not active_sources:
+                raise RuntimeError("Không còn bài nào có lyrics để tiếp tục Mix Set.")
+            todo_sources = [s for s in active_sources if s.id in need_cover]
+            missing_files = [s.query for s in todo_sources if not s.file_path
+                             or not Path(s.file_path).is_file()]
+            if missing_files:
+                raise RuntimeError("Chưa tải đủ file bài gốc: " +
+                                   "; ".join(missing_files[:5]))
+            auto_tempo = nct_jobs.AUTO_TEMPO_FACTOR
+            if todo_sources:
+                say(f"Đã tải đủ bài gốc — đang xuất tempo {auto_tempo:g}×.")
+            for src in todo_sources:
+                adjusted = Path(src.tempo_file_path) if src.tempo_file_path else None
+                if abs(float(src.tempo_factor or 1.0) - auto_tempo) >= 0.0005 or not adjusted or not adjusted.is_file():
+                    exported = tempo.export_file(
+                        Path(src.file_path), src.id, project.id, project.name,
+                        src.title, src.artist, src.query, auto_tempo)
+                    src.tempo_factor = auto_tempo
+                    src.tempo_file_path = str(exported)
+                    src.suno_song_ids = src.suno_editor_song_id = ""
+                    session.add(src)
             session.commit()
-            say(f"Đã tự loại {len(missing_lyrics)} bài không tìm được lyrics.")
-        sources = [s for s in sources if s and s.status not in _INACTIVE_SOURCE]
-        if not sources:
-            raise RuntimeError("Không còn bài nào có lyrics để tiếp tục Mix Set.")
-        missing_files = [s.query for s in sources if not s.file_path
-                         or not Path(s.file_path).is_file()]
-        if missing_files:
-            raise RuntimeError("Chưa tải đủ file bài gốc: " +
-                               "; ".join(missing_files[:5]))
-        auto_tempo = nct_jobs.AUTO_TEMPO_FACTOR
-        say(f"Đã tải đủ bài gốc — đang xuất tempo {auto_tempo:g}×.")
-        for src in sources:
-            adjusted = Path(src.tempo_file_path) if src.tempo_file_path else None
-            if abs(float(src.tempo_factor or 1.0) - auto_tempo) >= 0.0005 or not adjusted or not adjusted.is_file():
-                exported = tempo.export_file(
-                    Path(src.file_path), src.id, project.id, project.name,
-                    src.title, src.artist, src.query, auto_tempo)
-                src.tempo_factor = auto_tempo
-                src.tempo_file_path = str(exported)
-                src.suno_song_ids = src.suno_editor_song_id = ""
-                session.add(src)
-        session.commit()
 
     with Session(engine) as session:
         cover_ids = []
         for sid in source_ids:
             src = session.get(SourceSong, sid)
-            if not src or src.status in _INACTIVE_SOURCE or not src.lyrics_text.strip():
+            if (not src or src.status in _INACTIVE_SOURCE
+                    or src.status == "manual" or not src.lyrics_text.strip()):
                 continue
             has_cover = session.exec(select(CoverSong).where(
                 CoverSong.source_id == sid)).first() is not None
@@ -626,9 +642,49 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
             raise _StopAll("Dừng/hết giờ khi làm cover Suno.")
     with Session(engine) as session:
         sources = [session.get(SourceSong, sid) for sid in source_ids]
-        bad = [s.query for s in sources if not s or s.suno_status != "done"]
-        if bad:
-            raise _StopAll("Một số bài Suno chưa xong: " + "; ".join(bad[:5]))
+        active_sources = [s for s in sources if s and s.status not in _INACTIVE_SOURCE]
+        if not active_sources:
+            raise RuntimeError("Không còn bài hợp lệ trong project.")
+        bad_sources = [s for s in active_sources
+                       if s.status != "manual" and s.suno_status != "done"]
+        if bad_sources:
+            bad_names = "; ".join((s.query or s.title or f"#{s.id}") for s in bad_sources[:5])
+            # Chỉ dừng toàn bộ lô (_StopAll) khi gặp lỗi mức tài khoản / trình duyệt / giao diện
+            # khiến các bài tiếp theo chắc chắn cũng không chạy được. Nếu bài hiện tại bị Suno
+            # từ chối lyrics bản quyền (rejected) hoặc lỗi dữ liệu riêng lẻ của bài đó, chỉ báo
+            # RuntimeError để Track lẻ ghi nhận lỗi bài này rồi tự động sang bài kế tiếp.
+            def _is_account_or_browser_halt(src: SourceSong) -> bool:
+                if src.suno_status == "stopped":
+                    return True
+                if src.suno_status == "rejected":
+                    return False
+                err = (src.suno_error or "").casefold()
+                return any(
+                    kw in err
+                    for kw in (
+                        "chưa đăng nhập",
+                        "credit",
+                        "captcha",
+                        "không chắc suno đã nhận lệnh",
+                        "trình duyệt suno đã bị đóng",
+                        "suno_ui_changed",
+                        "sunouichanged",
+                        "không thấy nút",
+                        "không đưa được form",
+                    )
+                )
+
+            if any(_is_account_or_browser_halt(s) for s in bad_sources):
+                detail_err = next((s.suno_error for s in bad_sources if s.suno_error), "")
+                raise _StopAll(
+                    f"Một số bài Suno chưa xong: {bad_names}"
+                    + (f" ({detail_err[:180]})" if detail_err else "")
+                )
+            reasons = "; ".join(
+                f"{s.query or s.title}: {(s.suno_error or s.suno_status)[:140]}"
+                for s in bad_sources[:3]
+            )
+            raise RuntimeError(f"Suno không tạo được bài này ({reasons})")
         chain_project = session.get(Project, project_id)
         keep_all_versions = bool(chain_project and
                                  getattr(chain_project, "kind", "") == "single")
@@ -636,7 +692,9 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
         # Suno trong project; video dùng bản 1 (chọn tường minh bên dưới).
         # Mix Set: mỗi dòng = đúng một bài trong mix, nên chỉ giữ phiên bản đầu;
         # phiên bản thứ hai đưa vào thùng rác track để vẫn khôi phục thủ công.
-        for src in ([] if keep_all_versions else sources):
+        for src in ([] if keep_all_versions else active_sources):
+            if src.status == "manual":
+                continue
             songs = session.exec(select(CoverSong).where(
                 CoverSong.source_id == src.id).order_by(CoverSong.position,
                                                         CoverSong.id)).all()
@@ -652,6 +710,8 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
         time.sleep(5)
     if ev.is_set():
         raise RuntimeError("Đã huỷ.")
+    if audio_only:
+        _align_project_lyrics(batch_key, project_id, ev, prefix)
     with Session(engine) as session:
         project = session.get(Project, project_id)
         is_single = bool(project and (getattr(project, "kind", "") == "single"))
@@ -664,10 +724,13 @@ def _cover_chain(batch_key: str, project_id: int, source_ids: list[int],
         ok, detail = _verify_audio(project_id)
         if not ok:
             raise RuntimeError(f"Chưa hoàn tất audio: {detail}.")
-        say("Đã xong audio (chế độ Chỉ audio) — không dựng video.")
+        say("Đã xong audio + AI căn lời (chế độ Chỉ audio) — không dựng video.")
         return
     if audio_only:
-        say("Đã đủ cover — ghép Mix Set (chế độ Chỉ audio, không dựng video).")
+        if _verify_audio(project_id)[0]:
+            say("Đã xong Mix Set + AI căn lời (chế độ Chỉ audio) — không dựng video.")
+            return
+        say("Đã đủ cover + AI căn lời — ghép Mix Set (chế độ Chỉ audio, không dựng video).")
         mixes.start_mix_for_project(project_id, force_video=False)
     elif is_single:
         # Track lẻ: tuyệt đối không render Mix một bài. Dùng trực tiếp cover đã
@@ -773,17 +836,150 @@ def audio_folder(pid: int) -> Optional[Path]:
     return None
 
 
+def _unaligned_cover_count(pid: int) -> int:
+    """Số bản cover hoạt động còn tồn tại file trên ổ đĩa nhưng chưa được AI căn lời xong
+    (tính cả Track hoạt động chưa kịp đồng bộ dòng CoverSong)."""
+    with Session(engine) as session:
+        tracks = session.exec(select(Track).where(Track.project_id == pid)).all()
+        songs_by_tid = {
+            s.track_id: s for s in session.exec(select(CoverSong).where(
+                CoverSong.project_id == pid)).all()
+            if s.track_id is not None
+        }
+        count = 0
+        for track in tracks:
+            if not (track.filepath and Path(track.filepath).is_file()):
+                continue
+            song = songs_by_tid.get(track.id)
+            if song is None or song.align_status not in ("done", "edited"):
+                count += 1
+        return count
+
+
+def _align_project_lyrics(batch_key: str, project_id: int,
+                          ev: threading.Event, prefix: str = "") -> None:
+    """Đồng bộ CoverSong + lời bài gốc, chạy AI căn lời (tab ③ Lời bài hát)
+    và xuất sẵn file lời .srt cho các bản cover / bản mix."""
+    from backend.cover import jobs as align_jobs
+    from backend.cover.lyrics_export import export_song_srt_files
+    from backend.cover.mix_export import export_mix_audio
+    from backend.models import Mix
+    from backend.routers.cover import sync_songs
+
+    with Session(engine) as session:
+        pairs = sync_songs(session, project_id)
+        changed = False
+        for song, _track in pairs:
+            if song.source_id is None:
+                continue
+            src = session.get(SourceSong, song.source_id)
+            if src is None:
+                continue
+            if not song.lyrics_text.strip() and (src.lyrics_text or "").strip():
+                song.lyrics_text = src.lyrics_text
+                session.add(song)
+                changed = True
+            if not song.artist and src.artist:
+                song.artist = src.artist
+                session.add(song)
+                changed = True
+        if changed:
+            session.commit()
+        to_align = [s.id for s, t in pairs
+                    if t and t.filepath and Path(t.filepath).is_file()
+                    and s.align_status in ("none", "failed")
+                    and not align_jobs.is_queued(s.id)]
+    if to_align:
+        align_jobs.submit(project_id, to_align)
+    if not _wait_cover_worker(
+            batch_key, lambda: align_jobs.status(project_id), ev,
+            4 * 3600, "Đang AI căn lời bài hát", prefix):
+        raise RuntimeError("Dừng/hết giờ khi AI căn lời bài hát.")
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        pairs = sync_songs(session, project_id)
+        failed = [s for s, t in pairs
+                  if t and t.filepath and Path(t.filepath).is_file()
+                  and s.align_status not in ("done", "edited")]
+        if failed:
+            first = failed[0]
+            why = first.align_error or f"trạng thái {first.align_status}"
+            raise RuntimeError(
+                f"AI căn lời chưa xong ({len(failed)} bài — {first.title}: {why})")
+        for s, t in pairs:
+            if t and t.filepath and Path(t.filepath).is_file():
+                export_song_srt_files(t.filepath, s.lyrics_json)
+        if project and (getattr(project, "kind", "") or "mixset") != "single":
+            mixes_done = session.exec(select(Mix).where(
+                Mix.project_id == project_id, Mix.status == "completed")).all()
+            existing_mix = next(
+                (Path(m.output_dir) / "mix.wav" for m in reversed(mixes_done)
+                 if m.output_dir and (Path(m.output_dir) / "mix.wav").is_file()),
+                None)
+            if existing_mix is not None:
+                export_mix_audio(project.id, project.name, existing_mix)
+
+
 def _verify_audio(pid: int) -> tuple[bool, str]:
-    """Chế độ Chỉ audio: Track lẻ cần ít nhất 1 bản cover; Mix Set cần bản mix."""
+    """Chế độ Chỉ audio: Track lẻ cần đủ bản cover đang hoạt động trong DB + AI căn lời;
+    Mix Set cần thêm bản mix mới nhất + AI căn lời.
+    Tuyệt đối KHÔNG coi file cũ còn sót trên đĩa của các bản đã xoá vào Thùng rác
+    (DeletedTrack) là đã xong khi SourceSong đang lỗi/chưa tạo xong cover."""
     from backend.cover.mix_export import MIX_AUDIO_DIR
+    from backend.models import Mix
+
+    with Session(engine) as session:
+        proj = session.get(Project, pid)
+        if proj is None or getattr(proj, "deleted_at", None):
+            return (False, "project không tồn tại")
+        kind = getattr(proj, "kind", "") or "mixset"
+        active_sources = [
+            s for s in session.exec(select(SourceSong).where(
+                SourceSong.project_id == pid)).all()
+            if s.status not in _INACTIVE_SOURCE
+        ]
+        live_tracks = [
+            t for t in session.exec(select(Track).where(Track.project_id == pid)).all()
+            if t.filepath and Path(t.filepath).is_file()
+        ]
+        live_track_ids = {t.id for t in live_tracks if t.id is not None}
+        covered_source_ids = {
+            cs.source_id
+            for cs in session.exec(select(CoverSong).where(
+                CoverSong.project_id == pid)).all()
+            if cs.source_id is not None and cs.track_id in live_track_ids
+        }
+        mixes_done = session.exec(select(Mix).where(
+            Mix.project_id == pid, Mix.status == "completed")).all()
+
+    if active_sources:
+        pending_suno = [
+            s for s in active_sources
+            if (s.status != "manual" and s.suno_status != "done")
+            or (s.id not in covered_source_ids)
+        ]
+        if pending_suno:
+            return (False, f"còn {len(pending_suno)} bài gốc chưa xong Suno Cover")
+
+    if not live_tracks:
+        return (False, "chưa có bản cover hoạt động trong project")
+
+    unaligned = _unaligned_cover_count(pid)
+    if unaligned > 0:
+        return (False, f"còn {unaligned} bản cover chưa AI căn lời")
+
     folder = audio_folder(pid)
     if folder is None:
         return (False, "chưa có file audio")
-    with Session(engine) as session:
-        proj = session.get(Project, pid)
-        kind = (getattr(proj, "kind", "") if proj else "") or "mixset"
-    if kind != "single" and folder.name != MIX_AUDIO_DIR:
-        return (False, "chưa ghép xong bản mix")
+    if kind != "single":
+        if folder.name != MIX_AUDIO_DIR:
+            return (False, "chưa ghép xong bản mix")
+        valid_mixes = [
+            m for m in mixes_done
+            if m.output_dir and (Path(m.output_dir) / "mix.wav").is_file()
+        ]
+        if not valid_mixes:
+            return (False, "chưa ghép xong bản mix")
     return (True, f"audio đã có trong {folder}")
 
 
@@ -823,6 +1019,43 @@ def _run_cover_mixset(batch_key: str, project_id: int,
 
 _COVER_KINDS = ("cover_mixset", "cover_singles")
 _INACTIVE_SOURCE = ("skipped_no_lyrics", "excluded")
+_UNTRIED_SOURCE = ("queued", "running", "stopped")
+
+
+def _is_missing_lyrics(s: SourceSong) -> bool:
+    """Bài ĐÃ chạy tải nhạc gốc nhưng không có lời (chờ dán tay / bỏ qua).
+    Bài còn đang xếp hàng chưa tải (queued/running/stopped) KHÔNG phải bài thiếu lời."""
+    return (
+        s.status not in (*_INACTIVE_SOURCE, *_UNTRIED_SOURCE)
+        and not (s.lyrics_text or "").strip()
+    )
+
+
+def revive_untried_sources(session: Session, batch_key: Optional[str] = None) -> int:
+    """Khôi phục các SourceSong chưa từng tải nhạc gốc (file_path và title đều trống)
+    nhưng từng bị đồng hồ 5 phút cũ đánh dấu nhầm sang skipped_no_lyrics."""
+    if batch_key:
+        rows = _batch_sources(session, batch_key)
+    else:
+        rows = session.exec(
+            select(SourceSong).join(Project, SourceSong.project_id == Project.id)
+            .where(Project.deleted_at == None)  # noqa: E711
+        ).all()
+    revived = 0
+    for s in rows:
+        if (
+            s.status == "skipped_no_lyrics"
+            and not (s.file_path or "").strip()
+            and not (s.title or "").strip()
+            and "5 phút" in (s.error or "")
+        ):
+            s.status = "queued"
+            s.error = None
+            session.add(s)
+            revived += 1
+    if revived:
+        session.commit()
+    return revived
 
 
 def _batch_sources(session: Session, batch_key: str) -> list[SourceSong]:
@@ -1121,6 +1354,8 @@ def resume_batch(batch_key: str) -> Optional[dict]:
             return None
         params = json.loads(run.params_json or "{}")
         kind = params.get("kind", "")
+        if kind in _COVER_KINDS:
+            revive_untried_sources(session, batch_key=batch_key)
         project_id = run.current_project_id
         if kind == "cover_mixset" and not project_id:
             project = session.exec(select(Project).where(
@@ -1132,7 +1367,7 @@ def resume_batch(batch_key: str) -> Optional[dict]:
                 .order_by(SourceSong.position, SourceSong.id)).all()
             active_sources = [s for s in sources
                               if s.status not in ("skipped_no_lyrics", "excluded")]
-            missing_lyrics = [s for s in active_sources if not (s.lyrics_text or "").strip()]
+            missing_lyrics = [s for s in active_sources if _is_missing_lyrics(s)]
             if missing_lyrics:
                 names = "; ".join((s.title or s.query or f"Bài #{s.id}")
                                   for s in missing_lyrics[:5])
@@ -1191,10 +1426,9 @@ def skip_missing_lyrics(batch_key: str, *, automatic: bool = False) -> Optional[
         sources = _batch_sources(session, batch_key)
         if not sources:
             raise ValueError("Không tìm thấy project của lô.")
-        missing = [s for s in sources if s.status not in ("skipped_no_lyrics", "excluded")
-                   and not (s.lyrics_text or "").strip()]
+        missing = [s for s in sources if _is_missing_lyrics(s)]
         keep = [s for s in sources if s.status not in ("skipped_no_lyrics", "excluded")
-                and (s.lyrics_text or "").strip()]
+                and ((s.lyrics_text or "").strip() or s.status in _UNTRIED_SOURCE)]
         if not missing:
             raise ValueError("Không còn bài nào thiếu lyrics để bỏ qua.")
         if not keep:

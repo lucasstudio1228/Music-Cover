@@ -8,6 +8,7 @@ const ICON: Record<string, string> = {
   batch: '🏭',
   'auto-run': '🚀',
   'cover-suno': '🎤',
+  'cover-align': '📝',
 };
 
 const STATUS: Record<string, { text: string; cls: string }> = {
@@ -44,8 +45,11 @@ export default function TaskBar() {
   const canResume = paused || !!data?.can_resume;
   const controlling = pauseAll.isPending || stopAll.isPending || resumeAll.isPending || autoRun.isPending;
   const routeProjectId = Number(location.pathname.match(/\/projects\/(\d+)/)?.[1] || 0) || undefined;
-  const targetProjectId = routeProjectId ?? tasks.find((t) => t.project_id)?.project_id
-    ?? recent.find((t) => t.project_id)?.project_id ?? undefined;
+  const activeTaskProjectId = tasks.find((t) => t.project_id)?.project_id ?? undefined;
+  // Khi đang ở trang danh sách Projects (/), ưu tiên default_project_id (= bài ĐẦU TIÊN chưa làm
+  // trong list) thay vì recent[0] (= bài vừa làm xong), để bấm Auto chạy tiếp ngay các bài còn lại.
+  const targetProjectId = routeProjectId ?? activeTaskProjectId
+    ?? (data?.default_project_id || undefined) ?? recent.find((t) => t.project_id)?.project_id ?? undefined;
   const open = (t: GlobalTask) => {
     if (t.project_id != null) navigate(`/projects/${t.project_id}?tab=${t.tab}`);
   };
@@ -169,16 +173,16 @@ export default function TaskBar() {
       <div className="mt-1 flex items-center justify-end gap-2 border-t border-white/5 pt-1">
         <button
           disabled={controlling || targetProjectId == null}
-          onClick={() => autoRun.mutate({ projectId: targetProjectId, audioOnly: true })}
-          title="Chạy tự động CHỈ AUDIO: tải bài → Suno Cover → master (Mix Set thêm bước ghép mix). Không dựng video."
+          onClick={() => autoRun.mutate({ projectId: routeProjectId, audioOnly: true })}
+          title="Chạy tự động CHỈ AUDIO: tải bài → Suno Cover → master → AI căn lời (.srt) cho bài đang mở hoặc toàn bộ các bài tiếp theo trong danh sách. Không dựng video."
           className="rounded-md border border-sky-400/40 bg-sky-950/50 px-3 py-1 text-[11px] font-semibold text-sky-100 hover:bg-sky-900/70 disabled:opacity-40"
         >
           {autoRun.isPending && autoRun.variables?.audioOnly ? '⏳ Đang kích hoạt…' : '🎧 Auto chỉ audio'}
         </button>
         <button
           disabled={controlling || targetProjectId == null}
-          onClick={() => autoRun.mutate({ projectId: targetProjectId, audioOnly: false })}
-          title="Chạy tự động CẢ AUDIO + VIDEO: giữ phần đã xong, nối từ checkpoint hiện tại đến final + nháp YouTube"
+          onClick={() => autoRun.mutate({ projectId: routeProjectId, audioOnly: false })}
+          title="Chạy tự động CẢ AUDIO + VIDEO: giữ phần đã xong, nối tiếp các bài còn lại đến final + nháp YouTube"
           className="rounded-md border border-violet-400/40 bg-violet-950/50 px-3 py-1 text-[11px] font-semibold text-violet-100 hover:bg-violet-900/70 disabled:opacity-40"
         >
           {autoRun.isPending && !autoRun.variables?.audioOnly ? '⏳ Đang kích hoạt…' : '🚀 Auto audio + video'}

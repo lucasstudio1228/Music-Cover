@@ -39,9 +39,81 @@ COVER_SLIDERS = {"weirdness": 10, "style_influence": 75,
                  # nguyên instrument/performance locks của tool.
                  "variety": 0,            # 0–4: Off/Normal/High/Extra/Max
                  "audio_influence": 50}
+# Khóa âm tính trong ô Exclude styles của Suno (More Options) để chặn dạo nhạc
+# dài / solo kèn-guitar lấn mất phần hát (LIVE 2026-11-26: Sầu Tím Thiệp Hồng).
+COVER_EXCLUSIONS = (
+    "instrumental, instrumental only, solo, saxophone solo, guitar solo, "
+    "piano solo, horn solo, synth solo, long intro, long outro, "
+    "extended instrumental break"
+)
 
 EDITOR_TEMPO_SLOW = 32
 EDITOR_TEMPO_FAST = 35
+
+
+def _fmt_mmss(seconds: float) -> str:
+    sec = max(0, int(round(float(seconds))))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def audio_duration_seconds(path: Optional[Path]) -> Optional[float]:
+    """Đo chính xác độ dài (giây) của file audio cục bộ bằng soundfile / ffprobe."""
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        import soundfile as sf
+        dur = float(sf.info(str(p)).duration)
+        if dur > 0:
+            return dur
+    except Exception:
+        pass
+    try:
+        import os
+        import shutil
+        import subprocess
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                cand = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+                if cand.is_file():
+                    ffprobe = str(cand)
+        if not ffprobe:
+            return None
+        kwargs: dict = {"capture_output": True, "text": True, "timeout": 15}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        res = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+            **kwargs,
+        )
+        val = float((res.stdout or "").strip())
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def compute_duration_matched_bpm(
+    current_bpm: int,
+    current_duration_sec: float,
+    target_duration_sec: float,
+    *,
+    min_bpm: int = 20,
+    max_bpm: int = 300,
+) -> int:
+    """Tính BPM mục tiêu để tổng thời lượng timeline bằng đúng 100% ``target_duration_sec``.
+
+    Trong Suno Song Editor, tốc độ phát tỉ lệ thuận với BPM nên độ dài timeline
+    tỉ lệ nghịch với BPM: ``current_bpm * current_duration == target_bpm * target_duration``.
+    """
+    if current_bpm <= 0 or current_duration_sec <= 0 or target_duration_sec <= 0:
+        return max(min_bpm, min(max_bpm, int(current_bpm or EDITOR_TEMPO_SLOW)))
+    raw = float(current_bpm) * (float(current_duration_sec) / float(target_duration_sec))
+    return max(min_bpm, min(max_bpm, int(round(raw))))
 
 
 def _genre_key(music_style: str, cover_style: str, description: str) -> str:
@@ -65,7 +137,8 @@ def lyrics_lock(gender: str = "", lyrics_lang: str = "", voice_word: str = "voca
              f"natural {words}")
     lang = (lyrics_lang or "").strip()
     sung = f"sung in {lang}" if lang else "sung in the original language"
-    return f"{voice}, {sung}, clear upfront vocals, no instrumental solo"
+    return (f"{voice}, {sung}, clear upfront vocals, "
+            "continuous vocal melody throughout, no instrumental solo")
 
 
 def cover_styles_for_project(music_style: str = "", description: str = "",
@@ -414,6 +487,278 @@ _JS_PASTE_TEXT = r"""(el, text) => { el.focus();
                                                 cancelable: true}));
   return true; }"""
 
+# Đặt giá trị cho input/textarea được React kiểm soát (_valueTracker).
+_JS_SET_NATIVE_VALUE = r"""(el, text) => {
+  el.focus();
+  const proto = el.tagName === 'TEXTAREA'
+    ? window.HTMLTextAreaElement.prototype
+    : window.HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (desc && desc.set) desc.set.call(el, text);
+  else el.value = text;
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  return true;
+}"""
+
+# Đảm bảo đang ở tab «Edit» (không phải «My Edits») ở cột trái của Song Editor Beta.
+_JS_MARK_EDITOR_EDIT_TAB = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const txt = e => (e.innerText || e.textContent || '').trim();
+  document.querySelectorAll('[data-tool-editor-edit-tab]')
+    .forEach(e => e.removeAttribute('data-tool-editor-edit-tab'));
+  const tabs = [...document.querySelectorAll("button,[role=tab]")].filter(e => {
+    if (!vis(e)) return false;
+    const r = e.getBoundingClientRect();
+    return r.x < innerWidth * 0.45 && r.y < 220 && /^edit$/i.test(txt(e));
+  });
+  if (!tabs.length) return null;
+  const t = tabs[0];
+  const sel = t.getAttribute('aria-selected') ?? t.getAttribute('data-state') ?? t.getAttribute('aria-pressed');
+  const active = sel === null ? true : /^(true|active|on|selected)$/i.test(sel);
+  if (!active) t.setAttribute('data-tool-editor-edit-tab', '1');
+  return {active};
+}"""
+
+# Dò ô «Styles» trong cột trái của Song Editor Beta (LIVE 2026-11-26: «Styles» và
+# «Exclude Styles» nằm CHUNG trong một thẻ bo góc nên không dừng khi tổ tiên chứa
+# chữ «Exclude Styles»; thay vào đó khoanh vùng hình học nằm DƯỚI tiêu đề «Styles»
+# và TRÊN tiêu đề «Exclude Styles», đồng thời tránh nút «↺» Reset).
+_JS_MARK_EDITOR_STYLES = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  document.querySelectorAll('[data-tool-editor-styles],[data-tool-editor-open-styles]')
+    .forEach(e => {
+      e.removeAttribute('data-tool-editor-styles');
+      e.removeAttribute('data-tool-editor-open-styles');
+    });
+  const inLeft = e => { const r = e.getBoundingClientRect(); return r.x < innerWidth * 0.55 && r.width > 20; };
+  const isEditable = e => {
+    if (!vis(e) || !inLeft(e)) return false;
+    if (e.getAttribute('data-cowrite-input') === 'true') return false;
+    if (e.disabled || e.getAttribute('aria-disabled') === 'true') return false;
+    const tag = e.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag === 'INPUT') {
+      const tp = (e.getAttribute('type') || 'text').toLowerCase();
+      return !/^(hidden|checkbox|radio|number|range|file|button|submit|reset)$/i.test(tp);
+    }
+    const ce = (e.getAttribute('contenteditable') || '').toLowerCase();
+    if (ce === 'true' || ce === '' && e.hasAttribute('contenteditable') || ce === 'plaintext-only') return true;
+    if ((e.getAttribute('role') || '').toLowerCase() === 'textbox') return true;
+    return false;
+  };
+
+  // Tìm tiêu đề «Styles» (không phải «Exclude Styles») và cuộn vào khung nhìn cột trái nếu bị khuất.
+  const allLeft = [...document.querySelectorAll('label,span,div,p,h2,h3,h4,button,summary')]
+    .filter(e => e.getBoundingClientRect().x < innerWidth * 0.55);
+  const headers = allLeft
+    .filter(e => /^(styles|style)$/i.test(txt(e)))
+    .filter(e => [...e.querySelectorAll('*')].every(c => !/^(styles|style)$/i.test(txt(c))));
+
+  for (const h of headers) {
+    let hr = h.getBoundingClientRect();
+    if (hr.width <= 0 || hr.height <= 0 || hr.bottom > innerHeight - 40 || hr.top < 40) {
+      try { h.scrollIntoView({block: 'center', behavior: 'instant'}); } catch (_) {}
+      hr = h.getBoundingClientRect();
+    }
+    if (hr.width <= 0 || hr.height <= 0) continue;
+
+    // Chặn dưới bằng tiêu đề «Exclude Styles» (nằm cùng khung ngay bên dưới ô Styles).
+    const excl = allLeft
+      .filter(e => vis(e) && /^exclude\s+styles$/i.test(txt(e)))
+      .filter(e => [...e.querySelectorAll('*')].every(c => !/^exclude\s+styles$/i.test(txt(c))))
+      .find(e => e.getBoundingClientRect().top > hr.top + 4);
+    const maxTop = excl ? excl.getBoundingClientRect().top + 4 : hr.bottom + 260;
+
+    // 1) Tìm mọi ô nhập khả kiến nằm ngay dưới «Styles» và phía trên «Exclude Styles».
+    const between = [...document.querySelectorAll(
+      "textarea,input,[contenteditable],[role='textbox']"
+    )].filter(isEditable).filter(e => {
+      const r = e.getBoundingClientRect();
+      return r.top >= hr.top - 4 && r.top < maxTop && Math.abs(r.left - hr.left) < 160;
+    }).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+
+    if (between.length) {
+      const pick = between[0];
+      pick.setAttribute('data-tool-editor-styles', '1');
+      return {
+        state: 'ready',
+        tag: pick.tagName,
+        editable: pick.tagName !== 'TEXTAREA' && pick.tagName !== 'INPUT',
+      };
+    }
+
+    // 2) Dự phòng leo cây DOM trong phạm vi thẻ Styles (chỉ chặn «My Edits», KHÔNG chặn «Exclude Styles»
+    //    nhưng loại trừ mọi ô nằm dưới tiêu đề «Exclude Styles»).
+    let card = h;
+    for (let depth = 0; depth < 6 && card.parentElement; depth++) {
+      const p = card.parentElement;
+      if (/\bmy\s+edits\b/i.test(txt(p))) break;
+      card = p;
+      const fields = [...card.querySelectorAll(
+        "textarea,input,[contenteditable],[role='textbox']"
+      )].filter(isEditable).filter(e => {
+        const r = e.getBoundingClientRect();
+        return r.top >= hr.top - 4 && r.top < maxTop;
+      });
+      if (fields.length) {
+        fields[0].setAttribute('data-tool-editor-styles', '1');
+        return {
+          state: 'ready',
+          tag: fields[0].tagName,
+          editable: fields[0].tagName !== 'TEXTAREA' && fields[0].tagName !== 'INPUT',
+        };
+      }
+    }
+
+    // 3) Có thể khung hiển thị mô tả Styles chỉ mount <textarea>/Lexical khi click vào chính hộp văn bản
+    //    nằm giữa «Styles» và «Exclude Styles», hoặc mục Styles đang thu gọn.
+    if (excl && excl.getBoundingClientRect().top - hr.bottom > 36) {
+      const boxes = [...document.querySelectorAll('div,p,section')].filter(e => {
+        if (!vis(e) || !inLeft(e)) return false;
+        const r = e.getBoundingClientRect();
+        return r.top >= hr.bottom - 2 && r.bottom <= excl.getBoundingClientRect().top + 4 &&
+               r.height >= 28 && r.width >= 120;
+      }).sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (ra.width * ra.height) - (rb.width * rb.height);
+      });
+      if (boxes.length) {
+        boxes[0].setAttribute('data-tool-editor-open-styles', '1');
+        return {state: 'collapsed', via: 'box'};
+      }
+    }
+
+    // Mục Styles đang đóng: bấm tiêu đề / mũi tên mở (tuyệt đối KHÔNG bấm nút ↺ Reset/Revert).
+    let hdr = h.closest('button,[role=button],summary');
+    if (!hdr) {
+      let row = h.parentElement;
+      for (let d = 0; d < 3 && row; d++, row = row.parentElement) {
+        const rr = row.getBoundingClientRect();
+        if (rr.height > 80) break;
+        const btn = [...row.querySelectorAll('button,[role=button]')].find(b => {
+          if (!vis(b)) return false;
+          const br = b.getBoundingClientRect();
+          // Nút ↺ nằm sát mép phải khi khung Styles đã mở: không bấm nếu không có chữ/chevron mở.
+          const lbl = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + txt(b)).trim();
+          if (/reset|revert|undo|restore|clear/i.test(lbl)) return false;
+          return !excl || (excl.getBoundingClientRect().top - hr.bottom <= 36) || br.x <= hr.right + 20;
+        });
+        if (btn) { hdr = btn; break; }
+      }
+    }
+    const target = hdr || h;
+    const lbl = ((target.getAttribute('aria-label') || '') + ' ' + (target.getAttribute('title') || '')).trim();
+    if (!/reset|revert|undo|restore|clear/i.test(lbl)) {
+      target.setAttribute('data-tool-editor-open-styles', '1');
+      return {state: 'collapsed', via: 'header'};
+    }
+  }
+  const fallback = [...document.querySelectorAll(
+    "[data-testid*='styles' i] textarea, textarea[maxlength='1000'], textarea[placeholder*='style' i]"
+  )].find(e => isEditable(e) && !/exclude/i.test((e.getAttribute('placeholder') || '') + ' ' + (e.getAttribute('aria-label') || '')));
+  if (fallback) {
+    fallback.setAttribute('data-tool-editor-styles', '1');
+    return {state: 'ready', tag: fallback.tagName, editable: false};
+  }
+  return null;
+}"""
+
+# Dò mục «Add Lyrics» / «Lyrics» trong cột trái của Song Editor Beta:
+# nếu đang đóng (chỉ hiện thanh «Add Lyrics ⌄») thì đánh dấu nút mở; nếu đã mở thì đánh dấu ô nhập.
+_JS_MARK_EDITOR_LYRICS = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  document.querySelectorAll(
+    '[data-tool-editor-lyrics],[data-tool-editor-add-lyrics-btn],[data-tool-editor-add-lyrics-row],[data-tool-editor-lyrics-apply]'
+  ).forEach(e => {
+    e.removeAttribute('data-tool-editor-lyrics');
+    e.removeAttribute('data-tool-editor-add-lyrics-btn');
+    e.removeAttribute('data-tool-editor-add-lyrics-row');
+    e.removeAttribute('data-tool-editor-lyrics-apply');
+  });
+  const inLeft = e => { const r = e.getBoundingClientRect(); return r.x < innerWidth * 0.5 && r.width > 20; };
+  const isField = e => vis(e) && inLeft(e) && e.getAttribute('data-cowrite-input') !== 'true' &&
+    !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+
+  const markReady = (field, card) => {
+    field.setAttribute('data-tool-editor-lyrics', '1');
+    if (card) {
+      const applyBtn = [...card.querySelectorAll('button,[role=button]')].find(b => {
+        if (!vis(b) || b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+        const t = txt(b);
+        return /^(apply|save lyrics|add lyrics|add|done|update lyrics)$/i.test(t) &&
+               !/save as new song|reset|clear|cancel/i.test(t);
+      });
+      if (applyBtn && applyBtn.getBoundingClientRect().y > field.getBoundingClientRect().y) {
+        applyBtn.setAttribute('data-tool-editor-lyrics-apply', '1');
+      }
+    }
+    return {
+      state: 'ready',
+      tag: field.tagName,
+      editable: field.isContentEditable || (field.getAttribute('role') || '') === 'textbox',
+      hasApply: !!document.querySelector("[data-tool-editor-lyrics-apply='1']"),
+    };
+  };
+
+  const direct = [...document.querySelectorAll(
+    "[role=textbox][aria-label*='lyrics' i],div[contenteditable='true'][aria-label*='lyrics' i]," +
+    "div.lyrics-editor-content[contenteditable='true'],textarea[aria-label*='lyrics' i]," +
+    "textarea[placeholder*='lyrics' i],[data-testid*='lyrics' i] textarea"
+  )].find(isField);
+  if (direct) return markReady(direct, direct.parentElement);
+
+  const styleHdr = [...document.querySelectorAll('label,span,div,p,h2,h3,h4')]
+    .find(e => vis(e) && inLeft(e) && /^(styles|style)$/i.test(txt(e)));
+  const stylesTop = styleHdr ? styleHdr.getBoundingClientRect().top : null;
+
+  const headers = [...document.querySelectorAll('button,[role=button],summary,label,span,div,p,h2,h3,h4')]
+    .filter(e => vis(e) && inLeft(e) && /^(add\s+lyrics|lyrics)$/i.test(txt(e)))
+    .filter(e => [...e.querySelectorAll('*')].every(c => !/^(add\s+lyrics|lyrics)$/i.test(txt(c))));
+
+  for (const h of headers) {
+    let card = h;
+    for (let depth = 0; depth < 6 && card.parentElement; depth++) {
+      const p = card.parentElement;
+      const pText = txt(p);
+      if (/\b(styles|exclude\s+styles|my\s+edits)\b/i.test(pText)) break;
+      card = p;
+      const fields = [...card.querySelectorAll(
+        "textarea,[contenteditable='true'],[role='textbox'],input[type='text'],input:not([type])"
+      )].filter(isField);
+      if (fields.length) return markReady(fields[0], card);
+    }
+    // Đang thu gọn («Add Lyrics ⌄»): đánh dấu cả nút mũi tên lẫn dòng tiêu đề để mở.
+    const wrapBtn = h.closest('button,[role=button],summary');
+    let row = wrapBtn || h;
+    for (let d = 0; d < 4 && row.parentElement; d++) {
+      const pr = row.parentElement.getBoundingClientRect();
+      if (pr.height > 76 || pr.width > innerWidth * 0.45) break;
+      if (/\b(styles|exclude\s+styles)\b/i.test(txt(row.parentElement))) break;
+      row = row.parentElement;
+    }
+    row.setAttribute('data-tool-editor-add-lyrics-row', '1');
+    const chevron = (wrapBtn && wrapBtn !== row) ? wrapBtn :
+      [...row.querySelectorAll('button,[role=button]')].find(b => {
+        if (!vis(b)) return false;
+        const lbl = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')).trim();
+        return !/reset|revert|clear|delete/i.test(lbl);
+      });
+    if (chevron) chevron.setAttribute('data-tool-editor-add-lyrics-btn', '1');
+    return {state: 'collapsed', hasBtn: !!chevron, hasRow: true};
+  }
+
+  // Dự phòng hình học: ô nhập nằm phía trên mục Styles trong cột trái.
+  if (stylesTop !== null) {
+    const above = [...document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")]
+      .find(e => isField(e) && e.getBoundingClientRect().bottom <= stylesTop + 4 && e.getBoundingClientRect().top > 60);
+    if (above) return markReady(above, above.parentElement);
+  }
+  return null;
+}"""
+
 # [href, chữ] của mọi link bài theo thứ tự DOM (danh sách sắp xếp New → mới trước).
 _JS_SONG_LINKS = r"""() => [...document.querySelectorAll("a[href*='/song/']")]
   .map(a => [a.getAttribute('href') || '', (a.innerText || a.textContent || '').trim()])"""
@@ -423,6 +768,91 @@ def _fold_title(text: str) -> str:
     """So tên bài: NFC, chữ thường, gộp khoảng trắng."""
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "")).strip().casefold()
 
+
+# Đọc tổng thời lượng bài đang hiển thị trong Suno Song Editor (thay đổi tức thì
+# khi chỉnh Manual BPM). Ưu tiên theo độ tin cậy:
+#   1) Cặp «0:00 / 4:30» trên thanh transport/timeline (lấy vế phải dấu /).
+#   2) Hai mốc thời gian nằm hai đầu thanh phát dưới cùng (0:00 ... 4:30).
+#   3) Thuộc tính duration của phần tử <audio>/<video> nếu có.
+_JS_EDITOR_DURATION_SECONDS = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const parseTime = s => {
+    const m = String(s || '').trim().match(/^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:\.(\d+))?$/);
+    if (!m) return null;
+    const h = m[1] ? Number(m[1]) : 0;
+    const min = Number(m[2]), sec = Number(m[3]);
+    const frac = m[4] ? Number('0.' + m[4]) : 0;
+    if ((!m[1] && min >= 60) || sec >= 60) return null;
+    return h * 3600 + min * 60 + sec + frac;
+  };
+
+  // 1) Dạng "0:00 / 1:07" hoặc "00:00 / 04:30"
+  const slashRe = /(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*\/\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)(?:\s|$)/;
+  const slashHits = [];
+  for (const e of document.querySelectorAll('span,div,p,time,button')) {
+    if (!vis(e)) continue;
+    const t = txt(e);
+    if (!t || t.length > 36) continue;
+    if ([...e.children].some(c => vis(c) && slashRe.test(txt(c)))) continue;
+    const m = t.match(slashRe);
+    if (!m) continue;
+    const cur = parseTime(m[1]), tot = parseTime(m[2]);
+    if (cur !== null && tot !== null && tot >= 5 && tot <= 3600) {
+      const r = e.getBoundingClientRect();
+      slashHits.push({seconds: tot, current: cur, y: r.y, x: r.x, text: t, source: 'slash_pair'});
+    }
+  }
+  if (slashHits.length) {
+    // Ưu tiên thanh transport ở nửa dưới màn hình
+    slashHits.sort((a, b) => (b.y > innerHeight * 0.65 ? 1 : 0) - (a.y > innerHeight * 0.65 ? 1 : 0) || b.y - a.y);
+    return slashHits[0];
+  }
+
+  // 2) Hai mốc thời gian rời nhau ở thanh transport dưới cùng (vd "0:00" ... "4:30")
+  const timeOnlyRe = /^(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?$/;
+  const bottomTimes = [];
+  for (const e of document.querySelectorAll('span,div,p,time')) {
+    if (!vis(e) || e.children.length) continue;
+    const r = e.getBoundingClientRect();
+    if (r.y < innerHeight * 0.68) continue;
+    const t = txt(e);
+    if (!timeOnlyRe.test(t)) continue;
+    const sec = parseTime(t);
+    if (sec !== null && sec >= 0 && sec <= 3600) {
+      bottomTimes.push({seconds: sec, x: r.x, y: r.y, text: t});
+    }
+  }
+  let bestPair = null;
+  for (let i = 0; i < bottomTimes.length; i++) {
+    for (let j = i + 1; j < bottomTimes.length; j++) {
+      const a = bottomTimes[i], b = bottomTimes[j];
+      if (Math.abs(a.y - b.y) > 36) continue;
+      const left = a.x <= b.x ? a : b;
+      const right = a.x <= b.x ? b : a;
+      if (right.x - left.x < 16) continue;
+      if (left.seconds <= 15 && right.seconds >= 5 && right.seconds >= left.seconds) {
+        if (!bestPair || right.y > bestPair.y || (Math.abs(right.y - bestPair.y) <= 12 && right.seconds > bestPair.seconds)) {
+          bestPair = {seconds: right.seconds, current: left.seconds, y: right.y, x: right.x,
+                      text: left.text + ' .. ' + right.text, source: 'transport_pair'};
+        }
+      }
+    }
+  }
+  if (bestPair) return bestPair;
+
+  // 3) Fallback phần tử <audio> / <video>
+  let bestMedia = null;
+  for (const m of document.querySelectorAll('audio,video')) {
+    const d = Number(m.duration);
+    if (Number.isFinite(d) && d >= 5 && d <= 3600) {
+      if (!bestMedia || d > bestMedia.seconds) {
+        bestMedia = {seconds: d, source: 'media_element', text: String(d)};
+      }
+    }
+  }
+  return bestMedia;
+}"""
 
 # Một số bản Suno không đặt aria-label cho ô Tempo. Đánh dấu input gần nhãn
 # Tempo/BPM nhất để Playwright vẫn thao tác được, nhưng không đoán ô number khác.
@@ -451,15 +881,17 @@ _JS_MARK_EDITOR_TEMPO_INPUT = r"""() => {
   const vis = e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0; };
   document.querySelectorAll('[data-tool-editor-tempo-input]')
     .forEach(e => e.removeAttribute('data-tool-editor-tempo-input'));
-  const inputs=[...document.querySelectorAll('input')].filter(e => {
+  const inputs=[...document.querySelectorAll("input,[role='spinbutton']")].filter(e => {
     if (!vis(e) || e.disabled || e.getAttribute('aria-disabled') === 'true') return false;
-    const r=e.getBoundingClientRect(), n=Number(e.value);
+    const raw = ('value' in e ? e.value : (e.getAttribute('aria-valuenow') || e.innerText || ''));
+    const r=e.getBoundingClientRect(), n=Number(String(raw).trim());
     return Number.isFinite(n) && n>=20 && n<=300 && r.y>innerHeight*.65 &&
-           r.x>innerWidth*.45 && r.x<innerWidth*.85;
+           r.x>innerWidth*.25 && r.x<innerWidth*.90;
   });
   if (inputs.length !== 1) return null;
   inputs[0].setAttribute('data-tool-editor-tempo-input','1');
-  return {value:Number(inputs[0].value), type:inputs[0].type || ''};
+  const raw = ('value' in inputs[0] ? inputs[0].value : (inputs[0].getAttribute('aria-valuenow') || inputs[0].innerText || ''));
+  return {value:Number(String(raw).trim()), type:inputs[0].type || inputs[0].getAttribute('role') || ''};
 }"""
 
 # Editor Beta có biến thể hiển thị BPM bằng ``input[type=number] disabled``.
@@ -529,6 +961,18 @@ _JS_MARK_EDITOR_TEMPO_STEPPER = r"""() => {
         const right = near.filter(e => e.getBoundingClientRect().x > vr.right)
           .sort((a,b) => a.getBoundingClientRect().x-b.getBoundingClientRect().x)[0];
         down = down || left; up = up || right;
+        // Song Editor Beta biến thể cụm dọc «42 ▴▾»: 2 nút mũi tên xếp chồng dọc sát bên phải con số BPM.
+        if (!down || !up) {
+          const rightStack = near.filter(e => {
+            const r = e.getBoundingClientRect();
+            return r.x >= vr.right - 6 && r.x <= vr.right + 48;
+          }).sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+          if (rightStack.length === 2 &&
+              rightStack[1].getBoundingClientRect().y > rightStack[0].getBoundingClientRect().y + 2) {
+            up = up || rightStack[0];
+            down = down || rightStack[1];
+          }
+        }
       }
       if (down && up) {
         value.setAttribute('data-tool-tempo-value', '1');
@@ -960,9 +1404,10 @@ class CoverDriver(SunoDriver):
 
     def fill_song_lyrics(self, text: str) -> None:
         """Điền LỜI BÀI HÁT (khác fill_lyrics của tool cũ chỉ cho thẻ cấu trúc).
-        Luôn chuẩn hoá và thay dấu cách bằng «_» trước khi paste vào ô Lyrics."""
-        from .suno_lyrics import normalize_for_suno
-        text = normalize_for_suno(text or "")
+        Giữ nguyên dấu cách tiếng Anh trong các dòng thẻ ``[...]`` của AI Music Director,
+        và thay mọi dấu cách trên dòng lời hát ngoài ``[...]`` bằng «_»."""
+        from .suno_lyrics import prepare_lyrics_for_suno_box
+        text = prepare_lyrics_for_suno_box(text or "")
         if not text:
             raise SunoError("Bài chưa có lời — dán lời ở tab ① trước.")
         if len(text) > LYRICS_LIMIT:
@@ -1482,6 +1927,166 @@ class CoverDriver(SunoDriver):
             "và thử Legacy Editor."
             + (f" DOM: {probe}." if probe else ""), "editor_loading_timeout")
 
+    def _unlock_editor_manual_bpm(self) -> Optional[int]:
+        """Nếu BPM trong Editor đang bị khóa (có nút bánh răng bên cạnh), bấm mở
+        chọn «Manual BPM (Consistent)» để cho phép chỉnh Tempo."""
+        try:
+            locked = self.page.evaluate(_JS_MARK_EDITOR_TEMPO_GEAR)
+        except Exception:
+            locked = None
+        if not locked:
+            return None
+        locked_val = int(locked["value"])
+        self._log(f"Tempo Editor đang khóa ở {locked_val}; "
+                  "bấm nút bánh răng để bật chỉnh BPM.")
+        try:
+            gear = self.page.locator("[data-tool-tempo-gear='1']").first
+            gear.click(timeout=3000)
+            self._wait(500)
+            manual = query_first(self.page, [
+                "button:has-text('Manual BPM')",
+                "[role=button]:has-text('Manual BPM')",
+                "[role=menuitem]:has-text('Manual BPM')",
+                "text=Manual BPM (Consistent)",
+            ], timeout_ms=3500)
+            if manual is not None:
+                self._click(manual)
+                self._log("Đã chọn Manual BPM (Consistent).")
+            self._wait(700)
+        except Exception as exc:
+            raise SunoUIChanged(
+                f"Không mở được chế độ chỉnh Tempo từ nút bánh răng: {exc}") from exc
+        return locked_val
+
+    def read_editor_duration_seconds(self) -> Optional[float]:
+        """Đọc tổng thời lượng bài (giây) đang hiển thị trên timeline Suno Editor."""
+        try:
+            info = self.page.evaluate(_JS_EDITOR_DURATION_SECONDS)
+        except Exception:
+            return None
+        if not isinstance(info, dict) or info.get("seconds") is None:
+            return None
+        try:
+            val = float(info["seconds"])
+        except (TypeError, ValueError):
+            return None
+        return val if 5.0 <= val <= 3600.0 else None
+
+    def set_editor_tempo_for_duration(
+        self,
+        target_duration_sec: float,
+        *,
+        fallback_bpm: int = EDITOR_TEMPO_SLOW,
+        adjusted_duration_sec: Optional[float] = None,
+        max_adjust_passes: int = 3,
+    ) -> int:
+        """Tự động căn BPM trong Suno Editor sao cho tổng thời lượng bằng đúng 100% độ dài gốc.
+
+        Đọc BPM ban đầu + tổng thời lượng hiện tại ngay sau khi bật Manual BPM,
+        tính BPM đích theo quan hệ tỉ lệ nghịch ``B * D = const``, đặt BPM rồi
+        đọc lại thời lượng trên timeline để hiệu chỉnh vòng kín tới đúng số nguyên
+        gần ``target_duration_sec`` nhất.
+        """
+        target = float(target_duration_sec or 0.0)
+        if target <= 5.0:
+            return self.set_editor_tempo(fallback_bpm)
+        self._wait_editor_loaded()
+        self._unlock_editor_manual_bpm()
+        initial_bpm = self.read_editor_tempo()
+        if initial_bpm is None or not 20 <= initial_bpm <= 300:
+            self._log(
+                f"Auto Tempo: không đọc được BPM ban đầu từ Suno Editor — dùng fallback {fallback_bpm} BPM."
+            )
+            return self.set_editor_tempo(fallback_bpm)
+
+        dom_d0 = self.read_editor_duration_seconds()
+        adj_d = float(adjusted_duration_sec) if adjusted_duration_sec and adjusted_duration_sec > 5.0 else None
+        if dom_d0 is not None and adj_d is not None:
+            # Bảo vệ chống đọc nhầm một số khác trên trang: duration DOM ban đầu phải gần độ dài file upload.
+            if 0.35 * adj_d <= dom_d0 <= 2.5 * adj_d:
+                d0 = dom_d0
+                d0_src = "timeline Editor"
+            else:
+                d0 = adj_d
+                d0_src = "file upload"
+        elif dom_d0 is not None:
+            d0 = dom_d0
+            d0_src = "timeline Editor"
+        elif adj_d is not None:
+            d0 = adj_d
+            d0_src = "file upload"
+        else:
+            self._log(
+                f"Auto Tempo: không đọc được độ dài bài trên Editor/file — dùng fallback {fallback_bpm} BPM."
+            )
+            return self.set_editor_tempo(fallback_bpm)
+
+        candidate = compute_duration_matched_bpm(initial_bpm, d0, target)
+        self._log(
+            f"Auto Tempo (100% độ dài gốc {_fmt_mmss(target)}): Editor ban đầu "
+            f"{initial_bpm} BPM / {_fmt_mmss(d0)} ({d0_src}) → tính {candidate} BPM."
+        )
+        actual_bpm = self.set_editor_tempo(candidate)
+
+        # Vòng kiểm chứng & hiệu chỉnh kín bằng thời lượng thực trên timeline Editor.
+        tried: dict[int, float] = {}
+        for _ in range(max(1, int(max_adjust_passes))):
+            self._wait(600)
+            d_now = self.read_editor_duration_seconds()
+            if d_now is None:
+                break
+            # Nếu BPM đã đổi mạnh nhưng DOM thời lượng đứng yên hệt ban đầu → DOM không phản hồi,
+            # dừng ở kết quả tính từ tỉ lệ file (không hiệu chỉnh mù).
+            if not tried and abs(actual_bpm - initial_bpm) >= 5 and abs(d_now - d0) < 0.8:
+                self._log(
+                    f"Auto Tempo: timeline không đổi sau khi chỉnh sang {actual_bpm} BPM "
+                    f"— giữ nguyên {actual_bpm} BPM theo tỉ lệ độ dài gốc."
+                )
+                return actual_bpm
+
+            tried[actual_bpm] = d_now
+            err_sec = abs(d_now - target)
+            # Nửa bước nguyên của Suno (±0.5 BPM) là giới hạn mịn tối đa có thể đạt.
+            half_step_tol = max(1.5, target * (0.55 / max(actual_bpm, 20)))
+            if err_sec <= half_step_tol:
+                self._log(
+                    f"Auto Tempo khớp 100% độ dài gốc: {actual_bpm} BPM → timeline "
+                    f"{_fmt_mmss(d_now)} / mục tiêu {_fmt_mmss(target)} (lệch {err_sec:.1f}s)."
+                )
+                return actual_bpm
+
+            next_bpm = compute_duration_matched_bpm(actual_bpm, d_now, target)
+            if next_bpm == actual_bpm:
+                # Thử số nguyên kề cận đúng hướng để tìm điểm gần mục tiêu nhất.
+                neighbor = actual_bpm + 1 if d_now > target else actual_bpm - 1
+                if 20 <= neighbor <= 300 and neighbor not in tried:
+                    next_bpm = neighbor
+                else:
+                    break
+            if next_bpm in tried:
+                break
+            self._log(
+                f"Auto Tempo hiệu chỉnh: ở {actual_bpm} BPM timeline là {_fmt_mmss(d_now)} "
+                f"(mục tiêu {_fmt_mmss(target)}) → điều chỉnh sang {next_bpm} BPM."
+            )
+            actual_bpm = self.set_editor_tempo(next_bpm)
+
+        if tried:
+            best_bpm = min(tried, key=lambda b: abs(tried[b] - target))
+            if best_bpm != actual_bpm:
+                self._log(
+                    f"Auto Tempo chốt số nguyên gần nhất: {best_bpm} BPM "
+                    f"({_fmt_mmss(tried[best_bpm])} gần {_fmt_mmss(target)} hơn {actual_bpm} BPM)."
+                )
+                actual_bpm = self.set_editor_tempo(best_bpm)
+            else:
+                err_sec = abs(tried[best_bpm] - target)
+                self._log(
+                    f"Auto Tempo chốt {actual_bpm} BPM → timeline {_fmt_mmss(tried[best_bpm])} "
+                    f"/ mục tiêu {_fmt_mmss(target)} (lệch {err_sec:.1f}s)."
+                )
+        return actual_bpm
+
     def set_editor_tempo(self, bpm: int) -> int:
         """Đặt BPM trong Suno Editor và trả lại chính giá trị đọc từ UI.
 
@@ -1492,32 +2097,7 @@ class CoverDriver(SunoDriver):
         if not 20 <= int(bpm) <= 300:
             raise SunoError(f"Tempo Editor phải nằm trong khoảng 20–300 BPM: {bpm}.")
         self._wait_editor_loaded()
-        # Một số session mở ở chế độ BPM khóa. Bấm bánh răng cạnh con số trước
-        # rồi mới dò input/stepper thật; không thao tác spinner của input disabled.
-        try:
-            locked = self.page.evaluate(_JS_MARK_EDITOR_TEMPO_GEAR)
-        except Exception:
-            locked = None
-        if locked:
-            self._log(f"Tempo Editor đang khóa ở {int(locked['value'])}; "
-                      "bấm nút bánh răng để bật chỉnh BPM.")
-            try:
-                gear = self.page.locator("[data-tool-tempo-gear='1']").first
-                gear.click(timeout=3000)
-                self._wait(500)
-                manual = query_first(self.page, [
-                    "button:has-text('Manual BPM')",
-                    "[role=button]:has-text('Manual BPM')",
-                    "[role=menuitem]:has-text('Manual BPM')",
-                    "text=Manual BPM (Consistent)",
-                ], timeout_ms=3500)
-                if manual is not None:
-                    self._click(manual)
-                    self._log("Đã chọn Manual BPM (Consistent).")
-                self._wait(700)
-            except Exception as exc:
-                raise SunoUIChanged(
-                    f"Không mở được chế độ chỉnh Tempo từ nút bánh răng: {exc}") from exc
+        self._unlock_editor_manual_bpm()
         # Ưu tiên control thật đang hiện ở thanh Editor: ``− 91 +``. Suno còn
         # render một input number bị disabled trong Base UI portal (ví dụ 169);
         # chọn input đó trước sẽ vừa đọc sai Tempo vừa gây timeout khi click.
@@ -1686,8 +2266,270 @@ class CoverDriver(SunoDriver):
             "Đã bấm «Save as New Song» nhưng không xác định được bài mới để mở "
             "Remix → Cover; tool chưa bấm Create.", "saved_song_not_found")
 
+    def _ensure_editor_edit_tab(self) -> None:
+        """Đảm bảo cột trái của Song Editor đang chọn tab «Edit»."""
+        try:
+            st = self.page.evaluate(_JS_MARK_EDITOR_EDIT_TAB)
+        except Exception:
+            st = None
+        if st and not st.get("active"):
+            tab = query_first(self.page, ["[data-tool-editor-edit-tab='1']"], timeout_ms=1500)
+            if tab is not None:
+                try:
+                    self._click(tab)
+                    self._wait(400)
+                except Exception:
+                    pass
+
+    def _save_editor_left_probe(self, tag: str = "editor_left") -> Optional[str]:
+        """Lưu DOM gọn cột trái của Song Editor để chẩn đoán nếu Suno đổi cấu trúc Add Lyrics / Styles."""
+        if self.debug_dir is None:
+            return None
+        try:
+            rows = self.page.evaluate(r"""() => {
+              const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+              const out = [];
+              for (const e of document.querySelectorAll('button,textarea,input,[contenteditable],[role],label,span,div,p')) {
+                if (!vis(e)) continue;
+                const r = e.getBoundingClientRect();
+                if (r.x > innerWidth * 0.55 || r.width > 600) continue;
+                const text = (e.innerText || e.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+                const ph = e.getAttribute('placeholder') || '';
+                const aria = e.getAttribute('aria-label') || '';
+                const ce = e.getAttribute('contenteditable');
+                if (e.tagName === 'DIV' && ce === null && !e.getAttribute('role') && text.length > 40) continue;
+                out.push({
+                  tag: e.tagName, role: e.getAttribute('role') || '', ce: ce ?? '',
+                  aria, ph, val: ('value' in e ? String(e.value || '').slice(0, 120) : ''),
+                  text, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+                  html: (e.outerHTML || '').slice(0, 360),
+                });
+                if (out.length >= 90) break;
+              }
+              return {url: location.href, nodes: out};
+            }""")
+            folder = Path(self.debug_dir)
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{tag}_{time.strftime('%H%M%S')}.json"
+            path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            return str(path)
+        except Exception:
+            return None
+
+    def _fill_editor_box(self, loc, text: str, *, is_editable: bool, multiline: bool) -> str:
+        """Điền văn bản vào textarea/input hoặc ô Lexical contenteditable trong Song Editor,
+        trả lại giá trị đọc được trên UI."""
+        def _read() -> str:
+            try:
+                return (loc.inner_text() if is_editable else loc.input_value()) or ""
+            except Exception:
+                try:
+                    return loc.inner_text() or ""
+                except Exception:
+                    return ""
+
+        def _matches(got: str) -> bool:
+            if multiline:
+                want_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                got_lines = [ln.strip() for ln in got.replace("\r", "").splitlines() if ln.strip()]
+                return got_lines == want_lines
+            return " ".join(got.split()) == " ".join(text.split())
+
+        if not is_editable:
+            self._click(loc)
+            self._wait(120)
+            try:
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press("Delete")
+                loc.fill(text)
+            except Exception:
+                pass
+            self._wait(220)
+            got = _read()
+            if not _matches(got):
+                try:
+                    loc.evaluate(_JS_SET_NATIVE_VALUE, text)
+                    self._wait(250)
+                    got = _read()
+                except Exception:
+                    pass
+            if not _matches(got):
+                self._click(loc)
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press("Delete")
+                try:
+                    loc.evaluate(_JS_PASTE_TEXT, text)
+                except Exception:
+                    self.page.keyboard.insert_text(text)
+                self._wait(300)
+                got = _read()
+            # Phát blur nhẹ để React commit state mà không mất giá trị.
+            try:
+                loc.evaluate("el => { el.dispatchEvent(new Event('change', {bubbles: true})); el.blur && el.blur(); }")
+                self._wait(150)
+                after_blur = _read()
+                if after_blur:
+                    got = after_blur
+            except Exception:
+                pass
+            return got
+
+        self._click(loc)
+        self._wait(120)
+        self.page.keyboard.press("Control+A")
+        self.page.keyboard.press("Delete")
+        try:
+            loc.evaluate(_JS_PASTE_TEXT, text)
+            self._wait(300)
+        except Exception:
+            pass
+        got = _read()
+        if not _matches(got):
+            self._click(loc)
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.press("Delete")
+            if multiline:
+                raw_lines = text.splitlines()
+                for idx, ln in enumerate(raw_lines):
+                    if ln:
+                        self.page.keyboard.insert_text(ln)
+                    if idx < len(raw_lines) - 1:
+                        self.page.keyboard.press("Enter")
+            else:
+                self.page.keyboard.insert_text(text)
+            self._wait(350)
+            got = _read()
+        return got
+
+    def fill_editor_styles(self, styles: str) -> bool:
+        """Đồng bộ ô «Styles» trong Song Editor theo đúng prompt Cover do AI soạn."""
+        clean = (styles or "").strip()
+        if not clean:
+            return False
+        self._ensure_editor_edit_tab()
+        info = None
+        deadline = time.time() + 6.0
+        click_count = 0
+        while time.time() < deadline:
+            try:
+                info = self.page.evaluate(_JS_MARK_EDITOR_STYLES)
+            except Exception:
+                info = None
+            if info and info.get("state") == "ready":
+                break
+            if info and info.get("state") == "collapsed" and click_count < 2:
+                opener = query_first(self.page, ["[data-tool-editor-open-styles='1']"], timeout_ms=1500)
+                if opener is not None:
+                    try:
+                        self._click(opener)
+                        click_count += 1
+                        self._wait(500)
+                        continue
+                    except Exception:
+                        pass
+            self._wait(350)
+        if not info or info.get("state") != "ready":
+            probe = self._save_editor_left_probe("editor_styles_missing")
+            self._log("Song Editor hiện không thấy ô Styles khả dụng "
+                      + (f"(probe: {probe}) " if probe else "")
+                      + "— sẽ điền ở form Cover kế tiếp.")
+            return False
+        loc = query_first(self.page, ["[data-tool-editor-styles='1']"], timeout_ms=2500)
+        if loc is None:
+            return False
+        try:
+            got = self._fill_editor_box(
+                loc, clean, is_editable=bool(info.get("editable")), multiline=False)
+        except Exception as exc:
+            raise SunoUIChanged(f"Không điền được Styles trong Song Editor: {exc}") from exc
+        if " ".join(got.split()) != " ".join(clean.split()):
+            raise SunoUIChanged(
+                "Styles trong Song Editor không khớp prompt AI đã soạn "
+                f"(đọc lại {len(got)} ký tự, cần {len(clean)} ký tự).")
+        self._log(f"Song Editor: đã đồng bộ Styles theo prompt Cover AI ({len(clean)} ký tự).")
+        return True
+
+    def fill_editor_lyrics(self, text: str) -> bool:
+        """Mở mục «Add Lyrics» trong Song Editor và điền lyrics chuẩn hóa (giữ dấu cách
+        trong thẻ ``[...]`` tiếng Anh, thay dấu cách ngoài ``[...]`` bằng «_»)."""
+        from .suno_lyrics import prepare_lyrics_for_suno_box
+        suno_text = prepare_lyrics_for_suno_box(text or "")
+        if not suno_text:
+            return False
+        if len(suno_text) > LYRICS_LIMIT:
+            raise SunoError(f"Lời dài {len(suno_text)} ký tự, vượt giới hạn {LYRICS_LIMIT} của Suno.")
+        self._ensure_editor_edit_tab()
+        info = None
+        deadline = time.time() + 7.0
+        click_attempt = 0
+        while time.time() < deadline:
+            try:
+                info = self.page.evaluate(_JS_MARK_EDITOR_LYRICS)
+            except Exception:
+                info = None
+            if info and info.get("state") == "ready":
+                break
+            if info and info.get("state") == "collapsed":
+                click_attempt += 1
+                # Lần 1 ưu tiên bấm nút mũi tên/button; lần 2 thử bấm dòng tiêu đề «Add Lyrics».
+                order = (["[data-tool-editor-add-lyrics-btn='1']", "[data-tool-editor-add-lyrics-row='1']"]
+                         if click_attempt % 2 == 1 else
+                         ["[data-tool-editor-add-lyrics-row='1']", "[data-tool-editor-add-lyrics-btn='1']"])
+                opener = query_first(self.page, order, timeout_ms=1500)
+                if opener is not None:
+                    try:
+                        self._click(opener)
+                        self._wait(600)
+                        continue
+                    except Exception:
+                        pass
+            self._wait(350)
+        if not info or info.get("state") != "ready":
+            self._log("Song Editor hiện không có mục Add Lyrics (có thể đang ở Legacy Editor) — "
+                      "sẽ điền ở form Cover kế tiếp.")
+            return False
+        loc = query_first(self.page, ["[data-tool-editor-lyrics='1']"], timeout_ms=2500)
+        if loc is None:
+            return False
+        want_lines = [ln.strip() for ln in suno_text.splitlines() if ln.strip()]
+        try:
+            got = self._fill_editor_box(
+                loc, suno_text, is_editable=bool(info.get("editable")), multiline=True)
+        except Exception as exc:
+            raise SunoUIChanged(f"Không điền được Add Lyrics trong Song Editor: {exc}") from exc
+        got_lines = [ln.strip() for ln in got.replace("\r", "").splitlines() if ln.strip()]
+        if got_lines != want_lines:
+            raise SunoUIChanged(
+                "Add Lyrics trong Song Editor không khớp lời chuẩn nối «_» "
+                f"({len(got_lines)}/{len(want_lines)} câu).")
+        # Nếu thẻ Add Lyrics có nút xác nhận cục bộ (Apply / Save lyrics), bấm để gắn lời.
+        try:
+            refreshed = self.page.evaluate(_JS_MARK_EDITOR_LYRICS) or {}
+        except Exception:
+            refreshed = {}
+        if refreshed.get("hasApply"):
+            apply_btn = query_first(self.page, ["[data-tool-editor-lyrics-apply='1']"], timeout_ms=1200)
+            if apply_btn is not None:
+                try:
+                    self._click(apply_btn)
+                    self._wait(500)
+                except Exception:
+                    pass
+        self._log(f"Song Editor: đã điền Add Lyrics ({len(want_lines)} câu, dấu cách → «_»).")
+        return True
+
+    def sync_editor_lyrics_and_styles(self, *, lyrics: str = "", styles: str = "") -> dict:
+        """Điền đồng bộ Add Lyrics (nối «_») trước, rồi cuộn và điền Styles (prompt Cover AI)
+        ngay trong Song Editor để việc bung Add Lyrics không đẩy/làm trôi ô Styles."""
+        done_lyrics = self.fill_editor_lyrics(lyrics) if (lyrics or "").strip() else False
+        done_styles = self.fill_editor_styles(styles) if (styles or "").strip() else False
+        return {"styles": done_styles, "lyrics": done_lyrics}
+
     def prepare_editor_source(self, path: Path, bpm: int,
-                              human_wait_sec: float = 1800) -> str:
+                              human_wait_sec: float = 1800,
+                              *, lyrics: str = "", styles: str = "",
+                              target_duration_sec: Optional[float] = None,
+                              adjusted_duration_sec: Optional[float] = None) -> str:
         path = Path(path)
         if not path.exists():
             raise SunoError(f"Không thấy file đã chỉnh tempo: {path}")
@@ -1695,7 +2537,16 @@ class CoverDriver(SunoDriver):
         before = self.snapshot_song_ids()
         self._open_uploaded_audio_in_editor(path, before, human_wait_sec)
         self._wait_upload_dialog_clear(human_wait_sec)
-        actual_bpm = self.set_editor_tempo(bpm)
+        if target_duration_sec is not None and target_duration_sec > 5.0:
+            adj_dur = adjusted_duration_sec if adjusted_duration_sec is not None else audio_duration_seconds(path)
+            actual_bpm = self.set_editor_tempo_for_duration(
+                target_duration_sec,
+                fallback_bpm=bpm,
+                adjusted_duration_sec=adj_dur,
+            )
+        else:
+            actual_bpm = self.set_editor_tempo(bpm)
+        self.sync_editor_lyrics_and_styles(lyrics=lyrics, styles=styles)
         # Giữ kết quả đã đọc lại từ UI cho lớp job lưu vào SourceSong. Dùng
         # thuộc tính thay vì đổi contract prepare_cover để các driver/plugin cũ
         # vẫn tương thích.
@@ -1704,24 +2555,30 @@ class CoverDriver(SunoDriver):
         # item đó khỏi phép so để nhận đúng bài mới do Editor tạo ra.
         before_save = before | self.snapshot_song_ids()
         song_id = self.save_editor_as_new_song(before_save, title_hint=path.stem)
-        self._log(f"Đã lưu bài Editor mới ({song_id}) với Tempo {bpm}.")
+        self._log(f"Đã lưu bài Editor mới ({song_id}) với Tempo {actual_bpm}.")
         return song_id
 
     def read_editor_tempo(self) -> Optional[int]:
-        """Đọc (không chỉnh) Tempo đang hiện ở cụm ``− N +`` của Suno Editor."""
-        try:
-            info = self.page.evaluate(_JS_MARK_EDITOR_TEMPO_STEPPER)
-            return int(info["value"]) if info else None
-        except Exception:
-            return None
+        """Đọc (không chỉnh) Tempo hiện tại ở thanh dưới của Suno Editor (cụm ``− N +``,
+        ô input ``42 ▴▾``, hoặc ô BPM đang khóa cạnh nút bánh răng)."""
+        for js in (_JS_MARK_EDITOR_TEMPO_STEPPER,
+                   _JS_MARK_EDITOR_TEMPO_INPUT,
+                   _JS_MARK_EDITOR_TEMPO_GEAR):
+            try:
+                info = self.page.evaluate(js)
+                if info and info.get("value") is not None:
+                    return int(info["value"])
+            except Exception:
+                continue
+        return None
 
     def wait_user_editor_save(self, path: Path, bpm: int,
                               alert: Optional[Callable[[str], None]] = None,
-                              timeout_sec: float = 1800) -> str:
-        """Chế độ BÁN THỦ CÔNG: tool upload file tempo + mở Suno Editor; NGƯỜI DÙNG
-        tự chỉnh Tempo và tự bấm «Save as New Song». Tool chỉ theo dõi để nhận
-        đúng bài vừa lưu (ID mới trên URL Editor, hoặc bài «<tên file> … (Edit)»
-        mới trong thư viện) rồi trả ID đó. Tool không bấm nút nào trong Editor."""
+                              timeout_sec: float = 1800,
+                              *, lyrics: str = "", styles: str = "") -> str:
+        """Chế độ BÁN THỦ CÔNG: tool upload file tempo + mở Suno Editor + tự điền sẵn
+        Add Lyrics («_») và Styles (đồng bộ prompt Cover AI); NGƯỜI DÙNG chỉnh Tempo
+        và bấm «Save as New Song». Tool theo dõi bài vừa lưu rồi làm tiếp."""
         path = Path(path)
         if not path.exists():
             raise SunoError(f"Không thấy file đã chỉnh tempo: {path}")
@@ -1730,15 +2587,23 @@ class CoverDriver(SunoDriver):
         self._open_uploaded_audio_in_editor(path, before, timeout_sec)
         self._wait_upload_dialog_clear(timeout_sec)
         self._wait_editor_loaded()
+        synced = self.sync_editor_lyrics_and_styles(lyrics=lyrics, styles=styles)
         before_save = before | self.snapshot_song_ids()
         editor_id = self._song_id_in_url(self.page.url or "")
         if editor_id:
             before_save.add(editor_id)
-        msg = (f"✋ CẦN BẠN: trong cửa sổ Suno Editor hãy chỉnh Tempo (gợi ý {bpm} BPM) "
-               "rồi bấm «Save as New Song». Tool tự nhận bài vừa lưu và làm tiếp "
-               "Remix → Cover + điền lyrics/style.")
-        self._log("Đã mở Suno Editor — chờ bạn tự chỉnh Tempo và bấm «Save as New Song» "
-                  f"(tối đa {int(timeout_sec // 60)} phút).")
+        filled_parts = [name for ok, name in (
+            (synced.get("lyrics"), "Add Lyrics («_»)"),
+            (synced.get("styles"), "Styles AI"),
+        ) if ok]
+        filled_note = (f"tool đã điền sẵn {' & '.join(filled_parts)} trong Song Editor — "
+                       if filled_parts else "")
+        msg = (f"✋ CẦN BẠN: {filled_note}"
+               f"bạn hãy chỉnh Tempo (gợi ý {bpm} BPM) rồi bấm «Save as New Song». "
+               "Tool tự nhận bài vừa lưu và làm tiếp Remix → Cover + tự bấm Create.")
+        self._log("Đã mở Suno Editor"
+                  + (f" (đã điền {' & '.join(filled_parts)})" if filled_parts else "")
+                  + f" — chờ bạn tự chỉnh Tempo và bấm «Save as New Song» (tối đa {int(timeout_sec // 60)} phút).")
         (alert or self.on_human or self._log)(msg)
         seen_bpm: Optional[int] = None
         deadline = time.time() + timeout_sec
@@ -1854,7 +2719,11 @@ class CoverDriver(SunoDriver):
         if cover is None:
             raise self._ui_changed("Submenu Remix không có «Cover».", "no_remix_cover")
         before_url = self.page.url or ""
-        self._click(cover)
+        try:
+            self._click(cover)
+        except Exception as exc:
+            self._log(f"Submenu Cover vừa đóng khi bấm (lần {attempt}): {exc} — thử mở lại.")
+            return False
         self._log(f"Đã bấm Remix → Cover (lần {attempt}) — chờ Suno gắn audio vào form Create.")
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -1938,6 +2807,11 @@ class CoverDriver(SunoDriver):
                       manual_editor: bool = False,
                       alert: Optional[Callable[[str], None]] = None,
                       manual_wait_sec: float = 1800,
+                      *,
+                      exclusions: Optional[str] = None,
+                      sliders: Optional[dict] = None,
+                      max_mode: Optional[bool] = None,
+                      target_duration_sec: Optional[float] = None,
                       ) -> Optional[int]:
         """Upload → Editor → Save as New Song → Remix/Cover → điền form.
 
@@ -1958,9 +2832,14 @@ class CoverDriver(SunoDriver):
         else:
             if manual_editor:
                 source_song_id = self.wait_user_editor_save(
-                    original, editor_bpm, alert=alert, timeout_sec=manual_wait_sec)
+                    original, editor_bpm, alert=alert, timeout_sec=manual_wait_sec,
+                    lyrics=lyrics, styles=styles)
             else:
-                source_song_id = self.prepare_editor_source(original, editor_bpm)
+                editor_kwargs: dict = {"lyrics": lyrics, "styles": styles}
+                if target_duration_sec is not None and target_duration_sec > 5.0:
+                    editor_kwargs["target_duration_sec"] = float(target_duration_sec)
+                source_song_id = self.prepare_editor_source(
+                    original, editor_bpm, **editor_kwargs)
             if on_editor_saved is not None:
                 on_editor_saved(source_song_id)
         self._remix_cover_from_library(source_song_id)
@@ -1977,15 +2856,57 @@ class CoverDriver(SunoDriver):
         self.fill_title(title)
         self.fill_song_lyrics(lyrics)
         self.ensure_more_options()
+        effective_exclusions = COVER_EXCLUSIONS if exclusions is None else exclusions.strip()
+        self.fill_exclusions(effective_exclusions)
         if gender in ("male", "female"):
             self.set_vocal_gender(gender)
         else:
             self._log("Chưa biết giọng nam/nữ — để Suno tự chọn.")
-        self.set_max_mode(True)
-        self.set_creative_sliders(COVER_SLIDERS)
+        self.set_max_mode(True if max_mode is None else bool(max_mode))
+        effective_sliders = dict(COVER_SLIDERS)
+        if sliders:
+            for k, v in sliders.items():
+                if k in COVER_SLIDERS and v is not None:
+                    effective_sliders[k] = int(v)
+        self.set_creative_sliders(effective_sliders)
         self.check_rejection()
         if not self.cover_ready():
             raise self._ui_changed("Form rời chế độ Cover sau khi chỉnh — KHÔNG Create.",
                                    "lost_cover_mode")
         self.save_debug("form_ready")
         return credits
+
+    def fill_exclusions(self, exclusions: str) -> None:
+        """Điền ô Exclude styles an toàn trong panel cuộn của trang Cover (cuộn ra giữa
+        khung nhìn trước khi click; nếu thanh nổi Create che pointer thì điền trực tiếp
+        kèm phát sự kiện input/change và đọc lại xác nhận)."""
+        loc = self._find("exclude_styles", timeout_ms=6000, required=False)
+        if loc is None:
+            self._log("Không thấy ô Exclude styles — bỏ qua (cần More Options?).")
+            return
+        try:
+            try:
+                if loc.input_value() == exclusions:
+                    return
+            except Exception:
+                pass
+            try:
+                loc.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+                self._wait(200)
+            except Exception:
+                pass
+            try:
+                loc.click(timeout=4000)
+                loc.fill(exclusions)
+            except Exception as click_exc:
+                if "intercepts pointer events" not in str(click_exc).lower() and \
+                        "timeout" not in str(click_exc).lower():
+                    raise
+                loc.fill(exclusions, force=True)
+                loc.evaluate("""el => {
+                  el.dispatchEvent(new Event('input', {bubbles: true}));
+                  el.dispatchEvent(new Event('change', {bubbles: true}));
+                }""")
+            self._log(f"Đã điền Exclude styles ({len(exclusions)} ký tự).")
+        except Exception as e:
+            raise SunoUIChanged(f"Không điền được Exclude styles: {e}") from e

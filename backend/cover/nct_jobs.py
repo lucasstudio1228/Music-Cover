@@ -462,6 +462,13 @@ def _process(sid: int, bs, page):
         with Session(engine) as s:
             src = s.get(SourceSong, sid)
             if src:
+                if (src.lyrics_text or "").strip() and path.is_file():
+                    from .align import expand_source_lyrics_from_audio
+                    expanded_raw = expand_source_lyrics_from_audio(
+                        path, src.lyrics_text, log=log)
+                    if expanded_raw.strip() and expanded_raw != src.lyrics_text:
+                        src.lyrics_text = expanded_raw
+                        src.lyrics_suno_text = ""
                 # File nguồn vừa thay đổi: bản tempo cũ không còn là derivative
                 # hợp lệ và tuyệt đối không được đưa lên Suno.
                 old_tempo = Path(src.tempo_file_path) if src.tempo_file_path else None

@@ -122,6 +122,35 @@ def active_tasks(db: Session = Depends(get_session)):
                 "error": None,
                 "detail": f"còn {len(st.get('pending') or []) + (1 if st.get('current') else 0)} bài",
             })
+        elif st.get("finished_at") and now - st["finished_at"] <= RECENT_SECONDS and st.get("last_sid"):
+            src = db.get(SourceSong, st["last_sid"])
+            pid = src.project_id if src else None
+            recent.append({
+                "id": f"cover-suno:{st['last_sid']}", "source": "cover-suno",
+                "project_id": pid, "project_name": _name(db, names, pid),
+                "kind": "cover-suno", "label": "Cover trên Suno", "tab": "suno",
+                "status": st.get("last_status") or "completed",
+                "percent": None,
+                "message": (st.get("last_message") or "")[:300],
+                "error": (st.get("last_error") or "")[:300] or None,
+                "detail": "",
+                "ago_seconds": int(now - st["finished_at"]),
+            })
+    except Exception:       # noqa: BLE001
+        pass
+
+    # 0b) Hàng đợi «AI căn lời» (Demucs + Whisper, 1 bài 1 lúc).
+    try:
+        from backend.cover import jobs as align_jobs
+        for pid, st in align_jobs.all_active():
+            tasks.append({
+                "id": f"cover-align:{pid}", "source": "cover-align",
+                "project_id": pid, "project_name": _name(db, names, pid),
+                "kind": "cover-align", "label": "AI căn lời bài hát",
+                "tab": "lyrics", "status": "running",
+                "percent": None, "message": (st.get("message") or "")[:300],
+                "error": None, "detail": f"còn {st.get('pending', 0)} bài",
+            })
     except Exception:       # noqa: BLE001
         pass
 
@@ -203,7 +232,8 @@ def active_tasks(db: Session = Depends(get_session)):
     except Exception:       # noqa: BLE001
         pass
 
-    order = {"auto": 0, "batch": 1, "video": 2, "mix": 3, "stem": 4}
+    order = {"auto": 0, "batch": 1, "cover-suno": 2, "cover-align": 3,
+             "video": 4, "mix": 5, "stem": 6}
     tasks.sort(key=lambda t: (order.get(t["source"], 9), t["status"] == "pending"))
     recent.sort(key=lambda t: t["ago_seconds"])
     try:
@@ -211,8 +241,93 @@ def active_tasks(db: Session = Depends(get_session)):
         cover_can_resume = bool(suno_jobs.status().get("resume_count"))
     except Exception:       # noqa: BLE001
         cover_can_resume = False
+    default_pid = next((t["project_id"] for t in tasks if t.get("project_id")), None)
+    if default_pid is None:
+        default_pid = next((t["project_id"] for t in recent if t.get("project_id")), None)
+    if default_pid is None:
+        default_pid = _resolve_fallback_project_id(db)
     return {"tasks": tasks, "recent": recent[:3],
-            "can_resume": cover_can_resume or bool(_stopped_batch_keys)}
+            "can_resume": cover_can_resume or bool(_stopped_batch_keys),
+            "default_project_id": default_pid}
+
+
+def _first_incomplete_in_batch(db: Session, batch_key: str,
+                               audio_only: Optional[bool] = None) -> Optional[int]:
+    """Trả project ĐẦU TIÊN chưa hoàn tất trong lô ``batch_key`` (bỏ qua các bài đã xong)."""
+    from backend import batch_service
+
+    batch_projects = db.exec(
+        select(Project).where(Project.batch_id == batch_key,
+                              Project.deleted_at == None)  # noqa: E711
+        .order_by(Project.id)).all()
+    for p in batch_projects:
+        check_audio = audio_only if audio_only is not None else batch_service._is_audio_only(p.id)
+        done = (batch_service._verify_audio(p.id)[0] if check_audio
+                else batch_service._verify_product(p.id)[0])
+        if not done:
+            return p.id
+    return None
+
+
+def _resolve_fallback_project_id(db: Session,
+                                 audio_only: Optional[bool] = None) -> Optional[int]:
+    """Tìm project TIẾP THEO chưa hoàn tất trong danh sách khi người dùng bấm Auto
+    từ trang danh sách Projects (không lấy lại bài vừa làm xong)."""
+    from backend import batch_service
+
+    batch_service.revive_untried_sources(db)
+
+    # 1) Ưu tiên các lô sản xuất / danh sách Track lẻ gần nhất còn bài chưa xong.
+    runs = db.exec(select(BatchRun).order_by(BatchRun.id.desc())).all()
+    for run in runs:
+        if run.current_project_id:
+            proj = db.get(Project, run.current_project_id)
+            if proj and not proj.deleted_at:
+                check_audio = audio_only if audio_only is not None else batch_service._is_audio_only(proj.id)
+                done = (batch_service._verify_audio(proj.id)[0] if check_audio
+                        else batch_service._verify_product(proj.id)[0])
+                if not done:
+                    return proj.id
+        nxt = _first_incomplete_in_batch(db, run.batch_key, audio_only=audio_only)
+        if nxt is not None:
+            return nxt
+
+    # 2) Bài Suno vừa dừng/lỗi nếu project của nó vẫn chưa xong.
+    try:
+        from backend.cover import suno_jobs
+        last_sid = suno_jobs.status().get("last_sid")
+        if last_sid:
+            src = db.get(SourceSong, int(last_sid))
+            if src:
+                proj = db.get(Project, src.project_id)
+                if proj and not proj.deleted_at:
+                    check_audio = audio_only if audio_only is not None else batch_service._is_audio_only(proj.id)
+                    done = (batch_service._verify_audio(proj.id)[0] if check_audio
+                            else batch_service._verify_product(proj.id)[0])
+                    if not done:
+                        return proj.id
+    except Exception:       # noqa: BLE001
+        pass
+
+    # 3) Quét toàn bộ danh sách project chưa xoá để tìm project chưa hoàn tất tiếp theo.
+    all_projects = db.exec(
+        select(Project).where(Project.deleted_at == None)  # noqa: E711
+        .order_by(Project.id)).all()
+    for p in all_projects:
+        has_src_or_track = (
+            db.exec(select(SourceSong.id).where(SourceSong.project_id == p.id)).first() is not None
+            or db.exec(select(Track.id).where(Track.project_id == p.id)).first() is not None
+        )
+        if not has_src_or_track:
+            continue
+        check_audio = audio_only if audio_only is not None else batch_service._is_audio_only(p.id)
+        done = (batch_service._verify_audio(p.id)[0] if check_audio
+                else batch_service._verify_product(p.id)[0])
+        if not done:
+            return p.id
+
+    latest = all_projects[-1] if all_projects else None
+    return latest.id if latest else None
 
 
 def _auto_update(project_id: int, **values) -> None:
@@ -225,7 +340,7 @@ def _auto_update(project_id: int, **values) -> None:
 
 def _auto_wait_idle(project_id: int) -> None:
     """Đợi thao tác hiện tại tới checkpoint/xong rồi mới nối bước kế tiếp."""
-    from backend.cover import nct_jobs, suno_jobs
+    from backend.cover import jobs as align_jobs, nct_jobs, suno_jobs
     from backend.job_manager import job_manager
     from backend.video.job_manager import video_job_manager
 
@@ -239,7 +354,8 @@ def _auto_wait_idle(project_id: int) -> None:
             time.sleep(1)
             continue
         busy = (video_job_manager.is_busy() or job_manager.is_busy()
-                or suno_jobs.status().get("busy") or nct_jobs.status().get("busy"))
+                or suno_jobs.status().get("busy") or nct_jobs.status().get("busy")
+                or align_jobs.any_busy())
         if not busy:
             return
         _auto_update(project_id, status="running", percent=5.0,
@@ -261,6 +377,7 @@ def _auto_worker(project_id: int, audio_only: bool = False) -> None:
         _auto_update(project_id, status="running", percent=1.0,
                      message="Đang xác định checkpoint hiện tại…", error=None)
         with Session(engine) as session:
+            batch_service.revive_untried_sources(session)
             project = session.get(Project, project_id)
             if not project or project.deleted_at:
                 raise RuntimeError(f"Project {project_id} không tồn tại.")
@@ -274,6 +391,23 @@ def _auto_worker(project_id: int, audio_only: bool = False) -> None:
                 BatchRun.batch_key == batch_key)).first() if batch_key else None)
         if run:
             batch_service.set_audio_only(run.batch_key, audio_only)
+            # Nếu project thuộc một lô nhiều bài (vd. danh sách 50 Track lẻ) thì giao thẳng
+            # cho bộ điều phối lô để tự động chạy TUẦN TỰ toàn bộ các bài còn lại trong list,
+            # không chỉ kiểm tra một bài đơn lẻ.
+            if run.total > 1:
+                live = batch_service._threads.get(run.batch_key)
+                if live is not None and live.is_alive():
+                    _auto_update(project_id, status="completed", percent=100.0,
+                                 message="Danh sách đang chạy; bộ điều phối lô sẽ làm tiếp các bài còn lại.")
+                    return
+                _auto_wait_idle(project_id)
+                _auto_update(project_id, status="running", percent=10.0,
+                             message="Đang nối tiếp các bài chưa làm trong danh sách…")
+                batch_service.resume_batch(run.batch_key)
+                _stopped_batch_keys.discard(run.batch_key)
+                _auto_update(project_id, status="completed", percent=100.0,
+                             message="Đã khởi chạy tiếp các bài còn lại trong danh sách.")
+                return
 
         # Khi bấm Auto từ trạng thái tạm dừng: tiếp tục đúng checkpoint một lần.
         # Nếu người dùng bấm Tạm dừng SAU đó, vòng chờ tôn trọng lệnh và không
@@ -390,17 +524,59 @@ def _auto_worker(project_id: int, audio_only: bool = False) -> None:
             raise RuntimeError("Project chưa có bài gốc/track để tự động chạy.")
 
         if audio_only:
-            # Chỉ audio: Track lẻ đã có bản cover là xong; Mix Set ghép mix
-            # (không dựng video vì auto_video đã tắt ở trên).
-            if project.kind != "single" and not any(
-                    m.output_dir and (Path(m.output_dir) / "mix.wav").exists()
-                    for m in mixes_done):
+            # Chỉ audio: đồng bộ CoverSong, chạy AI căn lời cho các bài chưa căn,
+            # xuất sẵn .srt rồi Track lẻ xong ngay; Mix Set thêm bước ghép mix.
+            from backend.cover import jobs as align_jobs
+            from backend.cover.lyrics_export import export_song_srt_files
+            from backend.cover.mix_export import export_mix_audio
+            from backend.routers.cover import sync_songs
+            with Session(engine) as session:
+                pairs = sync_songs(session, project_id)
+                to_align = [s.id for s, t in pairs
+                            if t and t.filepath and Path(t.filepath).is_file()
+                            and s.align_status in ("none", "failed")
+                            and not align_jobs.is_queued(s.id)]
+            if to_align:
+                _auto_update(project_id, status="running", percent=35.0,
+                             message=f"Đang xếp AI căn lời cho {len(to_align)} bài…")
+                align_jobs.submit(project_id, to_align)
+            while align_jobs.status(project_id).get("busy"):
+                ev = _auto_cancel.get(project_id)
+                if ev is not None and ev.is_set():
+                    raise RuntimeError("Đã dừng tự động chạy theo yêu cầu.")
+                msg = align_jobs.status(project_id).get("message") or "Đang AI căn lời bài hát…"
+                _auto_update(project_id, status="running", percent=60.0,
+                             message=f"AI căn lời: {msg}")
+                time.sleep(2)
+            with Session(engine) as session:
+                project = session.get(Project, project_id)
+                pairs = sync_songs(session, project_id)
+                failed = [s for s, t in pairs
+                          if t and t.filepath and Path(t.filepath).is_file()
+                          and s.align_status not in ("done", "edited")]
+                if failed:
+                    first = failed[0]
+                    why = first.align_error or f"trạng thái {first.align_status}"
+                    raise RuntimeError(
+                        f"AI căn lời chưa xong ({len(failed)} bài — {first.title}: {why})")
+                for s, t in pairs:
+                    if t and t.filepath and Path(t.filepath).is_file():
+                        export_song_srt_files(t.filepath, s.lyrics_json)
+                mixes_done = session.exec(select(Mix).where(
+                    Mix.project_id == project_id, Mix.status == "completed")).all()
+            existing_mix = next(
+                (Path(m.output_dir) / "mix.wav" for m in reversed(mixes_done)
+                 if m.output_dir and (Path(m.output_dir) / "mix.wav").exists()),
+                None)
+            if project.kind != "single" and existing_mix is None:
                 mixes.start_mix_for_project(project_id, force_video=False)
                 _auto_update(project_id, status="completed", percent=100.0,
-                             message="Đã khởi động ghép Mix (chế độ Chỉ audio).")
+                             message="Đã xong AI căn lời — đang ghép Mix (chế độ Chỉ audio).")
                 return
+            if project.kind != "single" and existing_mix is not None:
+                export_mix_audio(project_id, project.name, existing_mix)
             _auto_update(project_id, status="completed", percent=100.0,
-                         message="Audio đã có sẵn — chế độ Chỉ audio không dựng video.")
+                         message="Đã xong audio + AI căn lời — chế độ Chỉ audio không dựng video.")
             return
 
         # Track lẻ bỏ qua Mix. Mix Set chưa có mix.wav thì render Mix; callback
@@ -439,13 +615,23 @@ def auto_run(project_id: Optional[int] = None, audio_only: bool = False,
     project_id được UI lấy từ trang đang mở; nếu đang ở trang khác thì dùng tác
     vụ gần nhất. Chỉ bật một controller cho mỗi project để chống bấm đúp.
     """
+    from backend import batch_service
+
+    batch_service.revive_untried_sources(db)
+    if project_id is not None:
+        # Nếu UI truyền vào một bài trong lô nhưng bài đó đã xong, tự chuyển con trỏ
+        # sang bài ĐẦU TIÊN chưa làm trong cùng lô để không hiện lại bài cũ rồi tắt.
+        given = db.get(Project, project_id)
+        if given and not given.deleted_at and given.batch_id:
+            nxt_in_batch = _first_incomplete_in_batch(db, given.batch_id, audio_only=audio_only)
+            if nxt_in_batch is not None:
+                project_id = nxt_in_batch
     if project_id is None:
         from backend.video.job_manager import video_job_manager
         active = video_job_manager.active_jobs()
         project_id = active[0].project_id if active else None
         if project_id is None:
-            run = db.exec(select(BatchRun).order_by(BatchRun.updated_at.desc())).first()
-            project_id = run.current_project_id if run else None
+            project_id = _resolve_fallback_project_id(db, audio_only=audio_only)
     project = db.get(Project, project_id) if project_id is not None else None
     if not project or project.deleted_at:
         raise HTTPException(400, "Hãy mở một project hoặc chọn tác vụ rồi bấm Tự động chạy.")

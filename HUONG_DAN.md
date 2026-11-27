@@ -98,7 +98,7 @@ Bấm **+ New Project**, rồi chọn 1 trong 4 kiểu:
   nút chạy tự động ở thanh dưới cùng khi muốn.
 - **🎧 Tạo & chạy tự động**: tool làm luôn. Chọn thêm **Kiểu chạy auto**:
   - **🎬 Audio + Video**: cover → master → (ghép mix) → dựng video → lưu nháp YouTube.
-  - **🎧 Chỉ audio**: cover → master → (ghép mix) rồi dừng.
+  - **🎧 Chỉ audio**: cover → master → AI căn lời (xuất `.srt`) → (ghép mix) rồi dừng.
 
   Kiểu này cần tick ô xác nhận dùng credit Suno.
 
@@ -121,7 +121,7 @@ File Office đời cũ (`.xls`, `.doc`) có thể không đọc được. Khi đ
 
 ### Thanh dưới cùng: chạy tự động
 
-- **🎧 Auto chỉ audio**: project đang mở chạy tiếp tự động đến hết phần âm thanh.
+- **🎧 Auto chỉ audio**: project đang mở chạy tiếp tự động đến hết phần âm thanh + AI căn lời (`.srt`).
 - **🚀 Auto audio + video**: chạy tiếp tới video + nháp YouTube.
 - Khi đang chạy có thêm **⏸ Tạm dừng**, **▶ Tiếp tục** và **⏹ Dừng lại**. ⏹ Dừng lại dừng tất cả
   việc, phần đã làm được giữ lại để chạy tiếp sau.
@@ -143,14 +143,10 @@ File Office đời cũ (`.xls`, `.doc`) có thể không đọc được. Khi đ
 
 ### ② Suno Cover
 **Quy trình ✋ Bán thủ công** (mặc định, tick ở đầu tab):
-1. **Tool:** upload bản tempo lên Suno, mở **Suno Editor**.
+1. **Tool:** upload bản tempo lên Suno, mở **Song Editor**, tự bung **Add Lyrics** điền lời nối dấu `_` và đồng bộ ô **Styles** theo đúng prompt Cover do AI soạn.
 2. **Bạn:** chỉnh **Tempo** trong Editor (tool gợi ý số) → bấm **Save as New Song**.
-3. **Tool:** mở bài vừa lưu → **Remix → Cover**, rồi điền form:
-   - tên bài (không kèm ca sĩ), lời, Styles, giọng nam/nữ;
-   - Max Mode, Weirdness 10, Style Influence 75, Audio Influence 50.
-4. **Bạn:** xem lại form trong cửa sổ Suno rồi **tự bấm Create**. Mỗi bài ra 2 bản, khoảng 20
-   credit.
-5. **Tool:** tải 2 bản WAV về, tự nghe kiểm tra lỗi, master, rồi sang bài tiếp theo.
+3. **Tool:** mở bài vừa lưu → **Remix → Cover**, điền đủ form (tên bài không kèm ca sĩ, lời đã nối `_`, Styles AI đồng bộ, Exclude styles, giọng nam/nữ, Max Mode, Weirdness 10, Style Influence 75, Audio Influence 50), rồi **tự động bấm Create** (mỗi bài ra 2 bản, khoảng 20 credit).
+4. **Tool:** tải 2 bản WAV về, tự nghe kiểm tra lỗi, master, và tự động tiến hành các bước tiếp theo (sang bài kế tiếp / AI căn lời `.srt` / ghép Mix / dựng Video tuỳ chế độ chạy).
 
 Các nút và tình huống khác:
 - **🧪 Chạy thử (không bấm Create):** tool điền form cho 1 bài rồi dừng, không tốn credit. Nên
@@ -200,8 +196,7 @@ Muốn nhập 1 bài kèm cả file bài gốc thì dùng ô **⬆ Nhập bài c
 
 ### ③ Lời bài hát
 - Bấm **🎤 Tạo lời bài hát**. Tool điền tên bài, ca sĩ, lời, rồi **AI căn từng câu theo nhạc**.
-- **AI căn sai?** Bấm ▶ nghe câu đó, bấm **⏱ đây** đúng lúc câu bắt đầu (hoặc gõ lại giờ), rồi bấm
-  **Lưu mốc thời gian**. Nếu cả bài lệch đều, dùng **-0.5s / -0.2s / +0.2s / +0.5s**.
+- **AI căn sai?** Bạn chỉ cần chỉnh đúng giờ **📌Đầu** (câu đầu) và **📌Cuối** (câu cuối) bằng ô giờ hoặc nút **⏱đầu / ⏹cuối**, rồi bấm **🎯 Giữ câu đầu & cuối — AI căn lại phần còn lại** để AI tự dò lại toàn bộ các câu ở giữa (có thể bấm **📌** ở câu bất kỳ giữa bài để khóa thêm mốc). Nếu cả bài lệch đều 1 khoảng nhỏ, dùng **-0.5s / -0.2s / +0.2s / +0.5s**.
 - Mỗi bài có nút **⬇ .lrc** và **⬇ .srt**. Câu dài tự **xuống dòng, tối đa 8 từ/dòng**.
 - Bật/tắt **sóng âm** trên video ở tab này.
 - ⚠️ Mix xong là tool **tự làm video ngay**. Vì vậy hãy **căn lời xong rồi mới bấm Mix**.

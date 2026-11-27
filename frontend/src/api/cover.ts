@@ -149,6 +149,18 @@ export function useAlignSong(projectId: number) {
   });
 }
 
+export function useAlignBetween(projectId: number) {
+  const done = useInvalidate(projectId);
+  return useMutation({
+    mutationFn: async (v: { id: number; lines: LyricLine[]; anchor_indices?: number[] }) =>
+      (await api.post(`${base}/songs/${v.id}/align-between`, {
+        lines: v.lines,
+        anchor_indices: v.anchor_indices,
+      })).data,
+    onSuccess: done,
+  });
+}
+
 export function useAlignAll(projectId: number) {
   const done = useInvalidate(projectId);
   return useMutation({

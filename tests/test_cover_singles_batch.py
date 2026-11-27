@@ -41,7 +41,8 @@ class CreateSinglesTests(unittest.TestCase):
             batch_service._threads.pop(result["batch_key"], None)
             batch_service._cancel_flags.pop(result["batch_key"], None)
             self.assertEqual(2, result["total"])
-            self.assertEqual(2, len(result["missing_lyrics"]))
+            # Các bài vừa tạo ở trạng thái queued (chưa chạy tải NCT) không bị liệt kê nhầm là thiếu lời.
+            self.assertEqual(0, len(result["missing_lyrics"]))
             with Session(db.engine) as session:
                 projects = session.exec(select(Project).order_by(Project.id)).all()
                 self.assertEqual(["Bai Mot - Ca Si", "Bai Hai - Ca Si"],

@@ -405,6 +405,21 @@ def master_file(src: Path, cfg: dict | None = None, preset_name: str | None = No
             _active.pop(key, None)
 
 
+def _copy_companion_srt(src: Path, targets: list[Path]) -> None:
+    """Nếu file gốc đã có file lời .srt cạnh bên, sao chép kèm sang thư mục mastered/."""
+    srt = Path(src).with_suffix(".srt")
+    if not srt.is_file():
+        return
+    for dest in targets:
+        dest_srt = Path(dest).with_suffix(".srt")
+        if dest_srt == srt or not dest_srt.parent.is_dir():
+            continue
+        try:
+            shutil.copy2(srt, dest_srt)
+        except OSError:
+            pass
+
+
 def _master_file(src: Path, cfg: dict, preset_name: str | None, log: Log,
                  log_file: Path | None, force: bool) -> dict:
     t0 = time.monotonic()
@@ -415,6 +430,7 @@ def _master_file(src: Path, cfg: dict, preset_name: str | None, log: Log,
         fmt = str(cfg.get("output_format") or "wav").lower()
         targets = master_paths(src, fmt)
         if not force and already_mastered(src, fmt):
+            _copy_companion_srt(src, targets)
             out.update(status="skipped", outputs=[str(p) for p in targets])
             log(f"[master] {src.name}: đã có bản _master — bỏ qua.")
             return out
@@ -456,6 +472,7 @@ def _master_file(src: Path, cfg: dict, preset_name: str | None, log: Log,
                 tmp.replace(dest)
             finally:
                 tmp.unlink(missing_ok=True)
+        _copy_companion_srt(src, targets)
         after = measure(exe, targets[0], preset["lufs"], ln["true_peak_db"], ln["lra"])
         out.update(status="done", outputs=[str(p) for p in targets],
                    before={"lufs": float(before["input_i"]), "tp": float(before["input_tp"])},

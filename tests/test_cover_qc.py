@@ -302,6 +302,99 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((r.status_code, r.content), (200, b"RIFF1"))
         self.assertEqual(self.client.get("/api/sources/covers/999/audio").status_code, 404)
 
+    def test_redo_clears_manual_flag_even_when_sqlite_reuses_track_id(self):
+        """Bấm «🚩 Báo lỗi» rồi «🔁 Tạo lại»: bản tạo lại mới (kể cả khi SQLite cấp lại
+        đúng track_id vừa xoá và cùng tên file cover.wav) KHÔNG còn bị báo lỗi nữa."""
+        sid = self._own(n=2).json()["id"]
+        self._review({})
+        first, second = self._items()[0]["covers"]
+        # Báo lỗi bản #1 và xoá bản #2 vào thùng rác (giống thao tác thực tế khiến
+        # SQLite cấp lại đúng track_id cho bản cover mới tạo sau redo).
+        self.assertEqual(
+            self.client.post(f"/api/sources/covers/{first['track_id']}/mark",
+                             json={"flagged": True}).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.delete(f"/api/projects/{self.pid}/tracks/{second['track_id']}").status_code,
+            200,
+        )
+        r = self.client.post(f"/api/sources/{sid}/redo",
+                             json={"track_ids": [first["track_id"]]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._items()[0]["covers"], [])
+
+        # Nhập 2 bản mới do Suno tạo lại — SQLite tái sử dụng đúng track_id của first!
+        r = self.client.post(
+            f"/api/sources/{sid}/covers",
+            files=[
+                ("files", ("suno_re_1.wav", b"RIFF-recreated-1-clean", "audio/wav")),
+                ("files", ("suno_re_2.wav", b"RIFF-recreated-2-clean", "audio/wav")),
+            ],
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        recreated = self._items()[0]["covers"]
+        self.assertEqual(recreated[0]["track_id"], first["track_id"])
+        # Ngay cả trước khi review chạy (pending) lẫn sau khi review xong: không còn cờ lỗi cũ.
+        self.assertFalse(recreated[0]["qc"]["manual_flag"])
+        self.assertEqual(recreated[0]["qc"]["status"], "pending")
+
+        self._review({})
+        recreated = self._items()[0]["covers"]
+        for c in recreated:
+            self.assertFalse(c["qc"]["manual_flag"])
+            self.assertEqual(c["qc"]["status"], "ok")
+            self.assertEqual(c["qc"]["issues"], [])
+
+    def test_replaced_audio_file_invalidates_stale_manual_flag(self):
+        """Phòng vệ kép: kể cả khi cover_qc.json cũ còn sót manual_flags của file trước,
+        nếu file audio trên ổ đĩa đã là bản mới (khác file_key) thì tự gỡ cờ báo lỗi cũ."""
+        self._own(n=1)
+        self._review({})
+        (cover,) = self._items()[0]["covers"]
+        tid = cover["track_id"]
+        self.client.post(f"/api/sources/covers/{tid}/mark", json={"flagged": True})
+        self.assertTrue(self._items()[0]["covers"][0]["qc"]["manual_flag"])
+
+        path = next((self.root / "media").rglob("ban_cover/*.wav"))
+        path.write_bytes(b"RIFF-brand-new-suno-cover-audio-bytes")
+        # Đang chờ đo lại: không còn bị gán đỏ oan từ file cũ.
+        (cover_pending,) = self._items()[0]["covers"]
+        self.assertFalse(cover_pending["qc"]["manual_flag"])
+        self.assertEqual(cover_pending["qc"]["status"], "pending")
+
+        self._review({})
+        (cover_after,) = self._items()[0]["covers"]
+        self.assertFalse(cover_after["qc"]["manual_flag"])
+        self.assertEqual(cover_after["qc"]["status"], "ok")
+
+    def test_qc_compares_against_original_song_not_4_5x_tempo_file(self):
+        """Bài gốc 4:48 (288s) xuất bản tempo 4.5x còn 1:04 (64s): bản cover 4:24 (264s)
+        phải được so với bài gốc 4:48 (→ Ổn), KHÔNG so nhầm với bản 1:04 (→ báo dài oan)."""
+        from sqlmodel import Session
+        from backend.models import SourceSong
+
+        sid = self._own(n=1).json()["id"]
+        tempo_file = self.root / "media" / "tempo_45x.wav"
+        tempo_file.parent.mkdir(parents=True, exist_ok=True)
+        tempo_file.write_bytes(b"RIFF-tempo-45x")
+        with Session(self.engine) as s:
+            src = s.get(SourceSong, sid)
+            src.tempo_file_path = str(tempo_file)
+            src.tempo_factor = 4.5
+            s.add(src)
+            s.commit()
+
+        self._review({
+            "Ca sĩ A.mp3": M(duration=288.0),
+            "tempo_45x.wav": M(duration=64.0),
+            "cover.wav": M(duration=264.0),
+        })
+        (cover,) = self._items()[0]["covers"]
+        self.assertEqual(cover["qc"]["status"], "ok")
+        self.assertEqual(cover["qc"]["issues"], [])
+        self.assertEqual(cover["qc"]["compared_with"], "original")
+
 
 if __name__ == "__main__":
     unittest.main()

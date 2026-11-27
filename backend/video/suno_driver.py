@@ -245,7 +245,8 @@ class SunoDriver:
 
     # ── tiện ích selector ────────────────────────────────────────
     def _find(self, key: str, timeout_ms: int = 8000, required: bool = True):
-        loc = query_first(self.page, self.sel.get(key, []), timeout_ms)
+        sel_map = getattr(self, "sel", None) or {}
+        loc = query_first(self.page, sel_map.get(key, []), timeout_ms)
         if loc is None and required:
             raise SunoUIChanged(
                 f"Không tìm thấy phần tử '{key}' trên Suno. Giao diện có thể đã "

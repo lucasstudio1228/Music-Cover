@@ -26,6 +26,8 @@ from .lyrics import strip_lyrics_header
 
 MAX_SYLLABLES = 12        # dòng dài hơn số chữ này mới tách tại dấu phẩy
 MIN_SPLIT_SIDE = 3        # mỗi nửa sau khi tách phải có ít nhất ngần này chữ
+AUTO_STANZA_MIN_LINES = 8 # bài dính liền 1 khối >= 8 câu → tự ngắt khổ 4 câu cho Suno
+STANZA_SIZE = 4
 
 # ───────────────────────────── ký tự ─────────────────────────────
 _INVISIBLE = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad",
@@ -229,4 +231,48 @@ def normalize_for_suno(raw: str) -> str:
         out.append(line)
     while out and out[-1] == "":
         out.pop()
+    if "" not in out and len(out) >= AUTO_STANZA_MIN_LINES:
+        chunks = [out[i:i + STANZA_SIZE] for i in range(0, len(out), STANZA_SIZE)]
+        if len(chunks) >= 2 and len(chunks[-1]) < 2:
+            chunks[-2].extend(chunks.pop())
+        stanzas: list[str] = []
+        for idx, chunk in enumerate(chunks):
+            if idx:
+                stanzas.append("")
+            stanzas.extend(chunk)
+        out = stanzas
     return "\n".join(line.replace(" ", "_") for line in out)
+
+
+def prepare_lyrics_for_suno_box(raw: str) -> str:
+    """Chuẩn bị văn bản điền vào ô Lyrics / Add Lyrics của Suno.
+
+    - Nếu văn bản đã có các dòng thẻ cấu trúc tiếng Anh ``[...]`` của AI Music Director:
+      giữ nguyên dấu cách tiếng Anh bên trong ``[...]`` (mỗi thẻ 1 dòng riêng) và chuẩn hóa
+      toàn bộ dòng lời hát ngoài ``[...]`` sang dấu gạch dưới ``_`` (NFC).
+    - Nếu là lời thô thông thường (không có thẻ cấu trúc AI Music Director):
+      chạy ``normalize_for_suno(raw)`` như cũ.
+    """
+    text = strip_lyrics_header(raw or "").strip()
+    if not text:
+        return ""
+    from .music_director import (
+        is_english_bracket_tag_content,
+        postprocess_structured_lyrics,
+    )
+
+    has_director_tag = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]") and len(s) > 2:
+            inner = re.sub(r"[\s_]+", " ", s[1:-1]).strip()
+            # Phân biệt thẻ chỉ dẫn của AI Music Director (VD: [Verse 1 - Intimate Vocal],
+            # [Trumpet Solo - 8 Bars]) hoặc văn bản đã nối '_' đi kèm thẻ [Verse 1]/[Chorus].
+            if is_english_bracket_tag_content(inner) and (
+                "-" in inner or "solo" in inner.casefold() or "_" in text
+            ):
+                has_director_tag = True
+                break
+    if has_director_tag:
+        return postprocess_structured_lyrics(text, underscore=True)
+    return normalize_for_suno(raw)

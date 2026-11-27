@@ -113,6 +113,49 @@ def build_srt(timeline: list[tuple[float, float, str]]) -> str:
     return "\n".join(blocks)
 
 
+def srt_for_song(lyrics_json: str) -> str:
+    """Dựng nội dung .srt cho 1 bản cover đơn lẻ (mốc 0 của chính file đó)."""
+    rows = [(float(l["start"]), float(l["end"]), _clean(l.get("text", "")))
+            for l in load_lines(lyrics_json)]
+    rows = sorted(r for r in rows if r[2])
+    timeline: list[tuple[float, float, str]] = []
+    for i, (t0, t1, text) in enumerate(rows):
+        nxt = rows[i + 1][0] if i + 1 < len(rows) else None
+        end = max(t1, t0 + 0.4) + LINE_HOLD_SEC
+        if nxt is not None:
+            end = min(end, nxt)
+        if end - t0 >= MIN_LINE_SEC:
+            timeline.append((max(t0, 0.0), end, text))
+    return build_srt(timeline) if timeline else ""
+
+
+def export_song_srt_files(track_filepath: str | Path, lyrics_json: str) -> list[Path]:
+    """Ghi file lời .srt cạnh bản cover (và cạnh bản _master nếu đã master)."""
+    content = srt_for_song(lyrics_json)
+    if not content.strip():
+        return []
+    src = Path(track_filepath)
+    targets = [src.with_suffix(".srt")]
+    try:
+        from . import mastering
+        master = mastering.find_master(src)
+        if master is not None:
+            m_srt = master.with_suffix(".srt")
+            if m_srt not in targets:
+                targets.append(m_srt)
+    except Exception:
+        pass
+    written: list[Path] = []
+    for dest in targets:
+        try:
+            if dest.parent.is_dir():
+                write_srt(dest, content)
+                written.append(dest)
+        except OSError:
+            pass
+    return written
+
+
 # ---------------- dữ liệu từ app.db / outputs ----------------
 def _project_data(project_id: int) -> tuple[Optional[str], str, list[tuple[int, list, str]],
                                             Optional[str]]:

@@ -9,10 +9,12 @@ import {
   useExportTempo,
   useImportCovers,
   useMakeLyrics,
+  useRedoCover,
   useRetrySource,
   useSources,
   useStartAllSources,
   useStopSources,
+  useSunoOne,
   useUpdateSource,
   useVerifyLyrics,
   type SourceSong,
@@ -178,23 +180,90 @@ export function CoverImportButton({ projectId, source, label = '⬆ Nhập file 
 }
 
 // ---------------------------------------------------------------- 1 bài
-function SourceRow({ projectId, s, index, current, requireLyrics = false }:
-  { projectId: number; s: SourceSong; index: number; current: boolean; requireLyrics?: boolean }) {
+function SourceRow({ projectId, s, index, current, sunoActive = false, requireLyrics = false }:
+  { projectId: number; s: SourceSong; index: number; current: boolean; sunoActive?: boolean; requireLyrics?: boolean }) {
   const update = useUpdateSource(projectId);
   const retry = useRetrySource(projectId);
   const verifyLyrics = useVerifyLyrics(projectId);
+  const expTempo = useExportTempo(projectId);
+  const redoCover = useRedoCover(projectId);
+  const sunoOne = useSunoOne(projectId);
   const del = useDeleteSource(projectId);
   const exclude = useExcludeSource(projectId);
   const [editQuery, setEditQuery] = useState<string | null>(null);
   const needsLyrics = s.lyric_line_count === 0;
   const [lyrics, setLyrics] = useState<string | null>(requireLyrics && needsLyrics ? '' : null);
   const [err, setErr] = useState<string | null>(null);
+  const [okNote, setOkNote] = useState<string | null>(null);
+  const [rerunning, setRerunning] = useState(false);
   const st = STATUS[s.status] ?? STATUS.failed;
   const busy = s.status === 'queued' || s.status === 'running';
+  const sunoBusy = sunoActive || s.suno_status === 'queued' || s.suno_status === 'running';
   const excluded = s.status === 'excluded';
   const manual = s.status === 'manual';
   const badCovers = s.covers.filter((c) => c.qc?.status === 'error').length;
-  const onErr = (e: unknown) => setErr(errText(e));
+  const onErr = (e: unknown) => { setOkNote(null); setErr(errText(e)); };
+
+  const runSunoWithLyrics = async (newLyrics?: string) => {
+    const rejected = s.suno_status === 'rejected';
+    if (rejected && !window.confirm(
+      'Suno đã từ chối lyrics cũ của bài này.\nXác nhận lyrics mới là nội dung bạn tự sáng tác hoặc có quyền sử dụng?',
+    )) return;
+    if (newLyrics === undefined && s.covers.length > 0) {
+      if (!window.confirm(
+        `Chạy lại «${s.title || s.query}» trên Suno theo lời đã sửa?\n\n`
+        + `• ${s.covers.length} bản cover cũ sẽ được cất vào thư mục ban_cover\\_loi (không xoá file) và xoá báo lỗi cũ.\n`
+        + '• AI Music Director sẽ phân tích lại lời mới, điền lại Song Editor & tạo 2 bản cover mới trên Suno.',
+      )) return;
+    } else if (newLyrics !== undefined && s.covers.length > 0) {
+      if (!window.confirm(
+        `Lưu lời mới và chạy lại «${s.title || s.query}» trên Suno?\n\n`
+        + `• ${s.covers.length} bản cover cũ sẽ được cất vào thư mục ban_cover\\_loi (không xoá file) và xoá báo lỗi cũ.\n`
+        + '• AI Music Director sẽ phân tích lại lời bạn vừa sửa và tạo 2 bản cover mới trên Suno.',
+      )) return;
+    }
+    setErr(null);
+    setOkNote(null);
+    setRerunning(true);
+    try {
+      let currentSource = s;
+      if (newLyrics !== undefined) {
+        currentSource = await update.mutateAsync({
+          id: s.id,
+          lyrics_text: newLyrics.normalize('NFC'),
+          authorized_lyrics: rejected || undefined,
+        });
+      }
+      if (!currentSource.tempo_ready && currentSource.has_file) {
+        currentSource = await expTempo.mutateAsync({
+          id: s.id,
+          tempoFactor: currentSource.tempo_factor > 0.2 && currentSource.tempo_factor !== 1
+            ? currentSource.tempo_factor
+            : DEFAULT_COVER_TEMPO,
+        });
+      }
+      if (s.covers.length > 0) {
+        await redoCover.mutateAsync({
+          id: s.id,
+          trackIds: s.covers.map((c) => c.track_id),
+          tempoOnly: false,
+        });
+      } else {
+        await sunoOne.mutateAsync({
+          id: s.id,
+          fresh: true,
+          tempoOnly: false,
+          authorizedLyrics: rejected || undefined,
+        });
+      }
+      if (newLyrics !== undefined) setLyrics(null);
+      setOkNote('✅ Đã lưu lời mới và xếp vào hàng đợi làm lại trên Suno.');
+    } catch (e) {
+      onErr(e);
+    } finally {
+      setRerunning(false);
+    }
+  };
 
   return (
     <li className={`rounded-lg border px-3 py-2 ${
@@ -259,17 +328,36 @@ function SourceRow({ projectId, s, index, current, requireLyrics = false }:
         <div className="mt-2 space-y-2 pl-8">
           <textarea className={`${input} h-56 font-mono text-xs`} value={lyrics}
             onChange={(e) => setLyrics(e.target.value)} placeholder="Mỗi câu 1 dòng" />
-          <div className="flex gap-2">
-            <button className={btnPrimary} disabled={update.isPending}
+          <div className="flex flex-wrap items-center gap-2">
+            <button className={btnPrimary} disabled={update.isPending || rerunning}
               onClick={() => {
                 // Bài Suno đã từ chối lyrics: lời thay thế phải là nội dung được phép.
                 const rejected = s.suno_status === 'rejected';
                 if (rejected && !window.confirm('Suno đã từ chối lyrics cũ của bài này.\nXác nhận lyrics mới là nội dung bạn tự sáng tác hoặc có quyền sử dụng?')) return;
+                setErr(null);
+                setOkNote(null);
                 update.mutate({ id: s.id, lyrics_text: lyrics.normalize('NFC'),
                                 authorized_lyrics: rejected || undefined }, {
-                  onSuccess: () => setLyrics(null), onError: onErr });
+                  onSuccess: () => {
+                    setLyrics(null);
+                    setOkNote('✅ Đã lưu lời mới. Bấm «↻ Làm lại trên Suno» bên dưới để tạo lại theo lời mới.');
+                  },
+                  onError: onErr,
+                });
               }}>Lưu lời</button>
-            <button className={btn} onClick={() => setLyrics(null)}>Đóng</button>
+            {(s.has_file || s.tempo_ready) && (
+              <button
+                className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+                disabled={update.isPending || rerunning || sunoBusy || !lyrics.trim()}
+                title={sunoBusy
+                  ? 'Bài này đang nằm trong hàng đợi Suno'
+                  : 'Lưu lời vừa sửa, dời bản cover cũ (nếu có) sang ban_cover\\_loi và chạy lại trên Suno theo lời mới'}
+                onClick={() => void runSunoWithLyrics(lyrics)}
+              >
+                {rerunning ? '⏳ Đang xếp hàng Suno…' : '💾 Lưu lời & ↻ Làm lại trên Suno'}
+              </button>
+            )}
+            <button className={btn} disabled={rerunning} onClick={() => setLyrics(null)}>Đóng</button>
           </div>
         </div>
       )}
@@ -289,8 +377,20 @@ function SourceRow({ projectId, s, index, current, requireLyrics = false }:
             title="Tool chỉ nhận bản official gốc. Gõ lại rõ tên + ca sĩ hoặc dán link bản official NhacCuaTui">✏️ Tìm bài khác</button>
         )}
         {lyrics === null && (
-          <button className={btnSm} onClick={() => setLyrics(s.lyrics_text)}>
+          <button className={btnSm} onClick={() => { setOkNote(null); setLyrics(s.lyrics_text); }}>
             📝 {s.lyric_line_count > 0 ? 'Xem/sửa lời' : 'Dán lời'}
+          </button>
+        )}
+        {!busy && (s.has_file || s.tempo_ready) && s.lyric_line_count > 0 && (
+          <button
+            className="rounded-md bg-emerald-600/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+            disabled={rerunning || sunoBusy}
+            title={sunoBusy
+              ? 'Bài này đang chạy hoặc đang chờ trong hàng đợi Suno'
+              : 'Chạy lại Suno Cover theo đúng lời hiện tại (bản cover cũ nếu có sẽ được cất vào ban_cover\\_loi)'}
+            onClick={() => void runSunoWithLyrics()}
+          >
+            {rerunning ? '⏳ Đang xếp hàng…' : sunoBusy ? '🎛 Đang chạy trên Suno' : '↻ Làm lại trên Suno'}
           </button>
         )}
         {!busy && !manual && s.lyric_line_count > 0 && (
@@ -346,6 +446,7 @@ function SourceRow({ projectId, s, index, current, requireLyrics = false }:
             }}>🗑 Xoá</button>
         )}
       </div>
+      {okNote && <p className="mt-1 pl-8 text-xs text-emerald-300">{okNote}</p>}
       {err && <p className="mt-1 pl-8 text-xs text-red-400">{err}</p>}
     </li>
   );
@@ -471,10 +572,14 @@ export default function SourcePanel({ projectId, onGoToLyrics, requireLyrics = f
           <p className="text-sm text-gray-400">Chưa có bài nào. Gõ tên bài – ca sĩ ở bên trái rồi bấm <b>Tìm &amp; tải</b>.</p>
         )}
         <ol className="space-y-2">
-          {items.map((s, i) => (
-            <SourceRow key={s.id} projectId={projectId} s={s} index={i}
-              current={worker?.current === s.id} requireLyrics={requireLyrics} />
-          ))}
+          {items.map((s, i) => {
+            const sunoWorker = data?.suno_worker;
+            const isSunoActive = sunoWorker?.current === s.id || !!sunoWorker?.pending.includes(s.id);
+            return (
+              <SourceRow key={s.id} projectId={projectId} s={s} index={i}
+                current={worker?.current === s.id} sunoActive={isSunoActive} requireLyrics={requireLyrics} />
+            );
+          })}
         </ol>
       </div>
     </div>

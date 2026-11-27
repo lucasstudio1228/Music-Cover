@@ -229,10 +229,39 @@ def shift_lines(song_id: int, seconds: float = Body(..., embed=True),
 
 
 # ---------------- AI căn lời ----------------
+class AlignBetweenIn(BaseModel):
+    lines: list[dict]
+    anchor_indices: Optional[list[int]] = None
+
+
 @router.post("/songs/{song_id}/align")
 def align_song(song_id: int, session: Session = Depends(get_session)):
     song, _ = _get_song(session, song_id)
     jobs.submit(song.project_id, [song.id])
+    return jobs.status(song.project_id)
+
+
+@router.post("/songs/{song_id}/align-between")
+def align_song_between(song_id: int, data: AlignBetweenIn,
+                       session: Session = Depends(get_session)):
+    """Giữ cố định mốc câu đầu & câu cuối (cùng các câu neo người dùng chọn),
+    xếp AI căn lại toàn bộ các câu còn lại ở giữa."""
+    song, _ = _get_song(session, song_id)
+    if len(data.lines) < 3:
+        raise HTTPException(400, "Cần ít nhất 3 câu lời để AI căn lại phần giữa.")
+    anchors = sorted({0, len(data.lines) - 1,
+                      *(i for i in (data.anchor_indices or []) if 0 <= i < len(data.lines))})
+    for a, b in zip(anchors, anchors[1:]):
+        try:
+            sa = float(data.lines[a].get("start") or 0.0)
+            sb = float(data.lines[b].get("start") or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Mốc thời gian không hợp lệ.") from exc
+        if sb <= sa + 0.2:
+            raise HTTPException(
+                400, f"Mốc Bắt đầu của câu #{b + 1} ({sb:.1f}s) phải lớn hơn câu #{a + 1} ({sa:.1f}s).")
+    if not jobs.submit_between(song.project_id, song.id, data.lines, anchors):
+        raise HTTPException(409, "Bài này đang được AI căn lời — vui lòng đợi xong.")
     return jobs.status(song.project_id)
 
 
@@ -265,23 +294,13 @@ def export_song_srt(song_id: int, session: Session = Depends(get_session)):
     lẻ / bài nhập sẵn khi chưa ghép Mix. Chỉ có lời, không tên bài/ca sĩ."""
     from urllib.parse import quote
     from fastapi.responses import Response
-    from backend.cover.lyrics_export import LINE_HOLD_SEC, MIN_LINE_SEC, _clean, build_srt
+    from backend.cover.lyrics_export import srt_for_song
     from backend.cover.mix_export import _safe
     song, _ = _get_song(session, song_id)
-    rows = [(float(l["start"]), float(l["end"]), _clean(l.get("text", "")))
-            for l in load_lines(song.lyrics_json)]
-    rows = sorted(r for r in rows if r[2])
-    timeline = []
-    for i, (t0, t1, text) in enumerate(rows):
-        nxt = rows[i + 1][0] if i + 1 < len(rows) else None
-        end = max(t1, t0 + 0.4) + LINE_HOLD_SEC
-        if nxt is not None:
-            end = min(end, nxt)
-        if end - t0 >= MIN_LINE_SEC:
-            timeline.append((max(t0, 0.0), end, text))
-    if not timeline:
+    content = srt_for_song(song.lyrics_json)
+    if not content.strip():
         raise HTTPException(404, "Bài này chưa có lời đã căn thời gian — bấm «AI căn lời» trước.")
-    body = ("\ufeff" + build_srt(timeline)).replace("\n", "\r\n").encode("utf-8")
+    body = ("\ufeff" + content).replace("\n", "\r\n").encode("utf-8")
     fname = f"{_safe(song.title or f'bai {song_id}')}.srt"
     return Response(body, media_type="application/x-subrip", headers={
         "Content-Disposition": f"attachment; filename=\"lyrics.srt\"; "

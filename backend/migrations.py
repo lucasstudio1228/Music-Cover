@@ -990,6 +990,27 @@ def migrate_add_project_creative_instrument():
         conn.close()
 
 
+def migrate_add_sourcesong_music_director_fields():
+    """M039: thêm cột lưu Exclude Styles động và JSON thông số của AI Music Director."""
+    if not DB_PATH.exists():
+        return
+    conn = _get_conn()
+    try:
+        if not _table_exists(conn, "sourcesong"):
+            return
+        for col in ("suno_exclude_styles", "suno_director_json"):
+            if not _column_exists(conn, "sourcesong", col):
+                print(f"  [Migration M039] Adding sourcesong column: {col}")
+                conn.execute(
+                    f"ALTER TABLE sourcesong ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise RuntimeError(f"Migration M039 failed: {e}") from e
+    finally:
+        conn.close()
+
+
 def run_all():
     """Gọi hàm này ở startup, trước create_db_and_tables()."""
     migrate_remove_project_api_fields()   # M001
@@ -1030,4 +1051,5 @@ def run_all():
     migrate_strip_lyrics_header()          # M036 — bỏ "Bài hát: Tên - Ca sĩ" đầu lời
     migrate_add_footage_scene_mode()       # M037 — TV/máy chiếu trình bày footage
     migrate_add_project_creative_instrument()  # M038 — nhạc cụ sáng tạo dùng chung
+    migrate_add_sourcesong_music_director_fields()  # M039 — AI Music Director exclude & JSON
     # Thêm migration mới vào đây theo thứ tự

@@ -3,12 +3,12 @@ import { api } from './client';
 
 export interface GlobalTask {
   id: string;
-  source: 'auto' | 'video' | 'mix' | 'stem' | 'batch' | 'cover-suno';
+  source: 'auto' | 'video' | 'mix' | 'stem' | 'batch' | 'cover-suno' | 'cover-align';
   project_id: number | null;
   project_name: string;
   kind: string;
   label: string;
-  tab: 'suno' | 'audio' | 'video';
+  tab: 'suno' | 'audio' | 'video' | 'lyrics';
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   percent: number | null;
   message: string;
@@ -21,6 +21,7 @@ export interface GlobalTasksResponse {
   tasks: GlobalTask[];
   recent: GlobalTask[];
   can_resume?: boolean;
+  default_project_id?: number | null;
 }
 
 /** Mọi tác vụ đang chạy/xếp hàng của cả tool (không phụ thuộc project đang xem). */
@@ -48,10 +49,14 @@ export function useAutoRunToEnd() {
   return useMutation({
     mutationFn: async ({ projectId, audioOnly = false }:
       { projectId?: number; audioOnly?: boolean }) => (await api.post(
-      '/api/tasks/auto-run', null,
-      { params: { ...(projectId != null ? { project_id: projectId } : {}),
-                  audio_only: audioOnly } },
-    )).data as { ok: boolean; project_id: number; status: string },
+        '/api/tasks/auto-run', null,
+        {
+          params: {
+            ...(projectId != null ? { project_id: projectId } : {}),
+            audio_only: audioOnly
+          }
+        },
+      )).data as { ok: boolean; project_id: number; status: string },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['global-tasks'] }),
   });
 }

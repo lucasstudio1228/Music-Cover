@@ -74,6 +74,13 @@ def _persist(session: Session, project_id: int, core_track) -> Track:
 
 def _trash_track(session: Session, track: Track) -> None:
     """Chụp đủ Track + CoverSong trước khi xoá bản ghi; file audio luôn được giữ."""
+    from backend.cover import cover_qc
+    from backend.models import Project
+
+    project = session.get(Project, track.project_id)
+    tid = track.id
+    pid = track.project_id
+    pname = project.name if project else None
     song = session.exec(
         select(CoverSong).where(CoverSong.track_id == track.id)).first()
     cover_data = ""
@@ -89,6 +96,8 @@ def _trash_track(session: Session, track: Track) -> None:
         cover_song_json=cover_data))
     _delete_track_stems(session, track)
     session.delete(track)
+    if tid is not None:
+        cover_qc.forget_tracks(pid, pname, [tid])
 
 
 def _restore_snapshot(session: Session, row: DeletedTrack) -> Track | None:

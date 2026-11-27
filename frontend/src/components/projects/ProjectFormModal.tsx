@@ -631,8 +631,8 @@ export default function ProjectFormModal({
                   «Tạo & chạy tự động» nữa. */}
               {([
                 [true, '🎧', 'Tạo & chạy auto chỉ audio', singles
-                  ? 'Tạo xong tool tự làm Cover → master từng bài rồi dừng. Không dựng video (dùng credit Suno).'
-                  : 'Tạo xong tool tự làm Cover → master → ghép mix rồi dừng. Không dựng video (dùng credit Suno).'],
+                  ? 'Tạo xong tool tự làm Cover → master → AI căn lời (.srt) từng bài rồi dừng. Không dựng video (dùng credit Suno).'
+                  : 'Tạo xong tool tự làm Cover → master → AI căn lời → ghép mix (.wav + .srt) rồi dừng. Không dựng video (dùng credit Suno).'],
                 [false, '🚀', 'Tạo & chạy auto audio + video', singles
                   ? 'Cover → master → dựng video → lưu nháp YouTube (dùng credit Suno).'
                   : 'Cover → master → ghép mix → dựng video → lưu nháp YouTube (dùng credit Suno).'],

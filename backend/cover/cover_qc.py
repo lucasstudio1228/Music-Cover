@@ -189,14 +189,14 @@ def load(project_id: int, project_name: Optional[str]) -> dict:
     try:
         data = json.loads(_path(project_id, project_name).read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            for k in ("covers", "originals"):
+            for k in ("covers", "originals", "flag_keys"):
                 data.setdefault(k, {})
             for k in ("manual_flags", "dismissed"):
                 data.setdefault(k, [])
             return data
     except Exception:       # noqa: BLE001 — chưa có / hỏng → báo cáo trống
         pass
-    return {"covers": {}, "originals": {}, "manual_flags": [], "dismissed": []}
+    return {"covers": {}, "originals": {}, "manual_flags": [], "dismissed": [], "flag_keys": {}}
 
 
 def _save(project_id: int, project_name: Optional[str], data: dict) -> None:
@@ -223,14 +223,23 @@ def evaluate(project_id: int, project_name: Optional[str],
     with _lock:
         data = load(project_id, project_name)
     cached = data["covers"]
+    flag_keys = data.get("flag_keys") or {}
     manual = {int(x) for x in data["manual_flags"]}
     dismissed = {int(x) for x in data["dismissed"]}
     ctx = _context([e["metrics"] for e in cached.values() if e.get("metrics")])
     out: dict[int, dict] = {}
     for tid, fpath, sid in covers:
-        e = cached.get(str(tid)) or {}
-        res = {"manual_flag": tid in manual, "dismissed": tid in dismissed, "issues": []}
-        if e.get("file_key") != _key(fpath):
+        key_str = str(tid)
+        e = cached.get(key_str) or {}
+        cur_fk = _key(fpath)
+        mark_fk = flag_keys.get(key_str) or e.get("file_key")
+        same_marked_file = not (mark_fk and cur_fk and mark_fk != cur_fk)
+        res = {
+            "manual_flag": (tid in manual) and same_marked_file,
+            "dismissed": (tid in dismissed) and same_marked_file,
+            "issues": [],
+        }
+        if e.get("file_key") != cur_fk:
             res["status"] = "error" if res["manual_flag"] else "pending"
             out[tid] = res
             continue
@@ -295,7 +304,11 @@ def review(project_id: int, *, engine=None,
         sids = {sid for sid in link.values() if sid is not None}
         origs = {}
         for src in s.exec(select(SourceSong).where(SourceSong.project_id == project_id)).all():
-            candidate = src.tempo_file_path or src.file_path
+            # Suno Editor đã trả nhịp bản tempo 4.5x về tốc độ gốc trước khi Cover,
+            # nên độ dài bản cover phải so với file bài gốc thật (chỉ fallback sang
+            # tempo_file_path khi không có file gốc).
+            candidate = (src.file_path if src.file_path and Path(src.file_path).exists()
+                         else src.tempo_file_path)
             if src.id in sids and candidate and Path(candidate).exists():
                 origs[src.id] = candidate
         covers = [(str(t.id), t.filepath) for t in tracks]
@@ -307,21 +320,44 @@ def review(project_id: int, *, engine=None,
     with _lock:
         data = load(project_id, name)      # đọc lại: có thể vừa bấm Báo lỗi / Nghe ổn
         alive = {int(k) for k, _ in covers}
+        cur_flag_keys = dict(data.get("flag_keys") or {})
+
+        def _mark_still_valid(tid: int) -> bool:
+            if tid not in alive:
+                return False
+            k = str(tid)
+            expected_fk = cur_flag_keys.get(k) or (old["covers"].get(k) or {}).get("file_key")
+            actual_fk = (new_covers.get(k) or {}).get("file_key")
+            if expected_fk and actual_fk and expected_fk != actual_fk:
+                return False
+            return True
+
+        kept_flags = sorted(x for x in map(int, data["manual_flags"]) if _mark_still_valid(x))
+        kept_ok = sorted(x for x in map(int, data["dismissed"]) if _mark_still_valid(x))
+        marked_ids = {str(x) for x in (*kept_flags, *kept_ok)}
+        cleaned_flag_keys = {}
+        for k in marked_ids:
+            fk = (new_covers.get(k) or {}).get("file_key") or cur_flag_keys.get(k)
+            if fk:
+                cleaned_flag_keys[k] = fk
         data["covers"] = new_covers
         data["originals"] = new_origs
-        data["manual_flags"] = sorted(x for x in map(int, data["manual_flags"]) if x in alive)
-        data["dismissed"] = sorted(x for x in map(int, data["dismissed"]) if x in alive)
+        data["manual_flags"] = kept_flags
+        data["dismissed"] = kept_ok
+        data["flag_keys"] = cleaned_flag_keys
         data["analyzed_at"] = _now()
         _save(project_id, name, data)
 
 
 def set_mark(project_id: int, project_name: Optional[str], track_id: int,
-             *, flagged: Optional[bool] = None, dismissed: Optional[bool] = None) -> None:
+             *, flagged: Optional[bool] = None, dismissed: Optional[bool] = None,
+             file_path: Optional[str] = None) -> None:
     """🚩 Báo lỗi (flagged) / ✓ Nghe ổn (dismissed) — hai cờ loại trừ nhau."""
     with _lock:
         data = load(project_id, project_name)
         flags = {int(x) for x in data["manual_flags"]}
         ok = {int(x) for x in data["dismissed"]}
+        flag_keys = dict(data.get("flag_keys") or {})
         if flagged is not None:
             (flags.add if flagged else flags.discard)(track_id)
             if flagged:
@@ -330,8 +366,68 @@ def set_mark(project_id: int, project_name: Optional[str], track_id: int,
             (ok.add if dismissed else ok.discard)(track_id)
             if dismissed:
                 flags.discard(track_id)
+        key_str = str(track_id)
+        if track_id in flags or track_id in ok:
+            fk = (_key(file_path) if file_path else None) or (
+                data["covers"].get(key_str) or {}).get("file_key")
+            if fk:
+                flag_keys[key_str] = fk
+        else:
+            flag_keys.pop(key_str, None)
         data["manual_flags"], data["dismissed"] = sorted(flags), sorted(ok)
+        data["flag_keys"] = flag_keys
         _save(project_id, project_name, data)
+
+
+def rebind_file_key(project_id: int, project_name: Optional[str],
+                    track_id: int, file_path: str) -> None:
+    """Cập nhật file_key đã ghim khi chính bản cover đó được chỉnh tempo tại chỗ."""
+    fk = _key(file_path)
+    if not fk:
+        return
+    key_str = str(track_id)
+    with _lock:
+        data = load(project_id, project_name)
+        flag_keys = dict(data.get("flag_keys") or {})
+        if key_str in flag_keys:
+            flag_keys[key_str] = fk
+            data["flag_keys"] = flag_keys
+            _save(project_id, project_name, data)
+
+
+def forget_tracks(project_id: int, project_name: Optional[str],
+                  track_ids: list[int] | set[int]) -> None:
+    """Xoá sạch cờ Báo lỗi / Nghe ổn / số đo cũ của các track đã bỏ hoặc tạo lại
+    (tránh SQLite cấp lại cùng track_id cho bản cover mới rồi dính lại báo lỗi cũ)."""
+    drop = {int(x) for x in track_ids if x is not None}
+    if not drop:
+        return
+    drop_keys = {str(x) for x in drop}
+    with _lock:
+        p = _path(project_id, project_name)
+        if not p.exists():
+            return
+        data = load(project_id, project_name)
+        changed = False
+        new_flags = sorted(x for x in map(int, data["manual_flags"]) if x not in drop)
+        if new_flags != data["manual_flags"]:
+            data["manual_flags"] = new_flags
+            changed = True
+        new_ok = sorted(x for x in map(int, data["dismissed"]) if x not in drop)
+        if new_ok != data["dismissed"]:
+            data["dismissed"] = new_ok
+            changed = True
+        flag_keys = dict(data.get("flag_keys") or {})
+        for k in drop_keys:
+            if k in flag_keys:
+                flag_keys.pop(k, None)
+                changed = True
+            if k in data["covers"]:
+                data["covers"].pop(k, None)
+                changed = True
+        if changed:
+            data["flag_keys"] = flag_keys
+            _save(project_id, project_name, data)
 
 
 # ══════════════════════════════════════════════════════════════════

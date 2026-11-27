@@ -19,6 +19,7 @@ hàng đợi, không bao giờ tự bấm Create lại.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import shutil
@@ -44,8 +45,15 @@ from backend.video.suno_driver import (SunoBudgetError, SunoCaptchaRequired,
 
 from . import mastering, nct, nct_jobs
 from .suno_cover import (REJECT_RE, TERMS_RE, CoverDriver, SunoCoverRejected,
+                         _fmt_mmss, audio_duration_seconds,
                          editor_tempo_for_genre)
 from .music_line import lyrics_language
+from .music_director import (
+    MusicDirectorError,
+    director_signature,
+    parse_solo_instruments,
+    run_music_director,
+)
 from .style_prompt import (enforce_vocal_first_styles, generate_cover_styles,
                            style_signature)
 
@@ -102,7 +110,9 @@ _manual_watch: set[int] = set()
 _manual_baselines: dict[int, set[str]] = {}
 # mode: None | "cover" | "login";  human: việc đang chờ NGƯỜI DÙNG làm trên Suno
 _state: dict = {"mode": None, "current": None, "message": "", "draining": False,
-                "login_scheduled": False, "human": "", "dry_run": False}
+                "login_scheduled": False, "human": "", "dry_run": False,
+                "last_sid": None, "last_status": "", "last_message": "",
+                "last_error": None, "finished_at": None}
 _last_create = 0.0              # time.monotonic() của lượt Create gần nhất
 # Bảng cam «lyrics contain copyrighted material» sau Create: tool chỉ BÁO người
 # dùng (bíp + popup + đưa cửa sổ Suno lên). Người dùng tự sửa lyrics và tự bấm
@@ -171,7 +181,12 @@ def status() -> dict:
             "resume_count": len(_resume_ids),
             "human": st["human"], "dry_run": bool(st["dry_run"] and st["current"]),
             "awaiting_lyrics": awaiting_lyrics(),
-            "semi_manual": get_workflow()["semi_manual"]}
+            "semi_manual": get_workflow()["semi_manual"],
+            "last_sid": st.get("last_sid"),
+            "last_status": st.get("last_status") or "",
+            "last_message": st.get("last_message") or "",
+            "last_error": st.get("last_error"),
+            "finished_at": st.get("finished_at")}
 
 
 def awaiting_lyrics() -> dict | None:
@@ -550,16 +565,55 @@ def _browser():
         nct_jobs._close_browser(bs)
 
 
+def _clean_suno_tabs(bs, primary):
+    """Đóng các tab about:blank dư thừa trên trình duyệt Suno và đưa tab chính lên trên."""
+    try:
+        for p in list(bs.context.pages):
+            if p is primary or p.is_closed():
+                continue
+            u = (p.url or "").strip().lower()
+            if u in ("", "about:blank"):
+                try:
+                    p.close()
+                except Exception:
+                    pass
+        primary.bring_to_front()
+    except Exception:
+        pass
+
+
 def _ensure_page(bs, page):
-    """(phiên, tab) còn sống; người dùng lỡ đóng cả cửa sổ → mở lại trình duyệt."""
+    """(phiên, tab) còn sống; dùng duy nhất 1 tab chính để không hiện 2 tab about:blank."""
     if bs is not None:
         try:
-            return bs, nct_jobs._live_page(bs, page)
+            live = nct_jobs._live_page(bs, page, work=False)
+            list(live.context.pages)
+            _clean_suno_tabs(bs, live)
+            return bs, live
         except Exception:
             nct_jobs._close_browser(bs)
     _set_msg("Đang mở trình duyệt Suno…")
     bs = _open_browser()
-    return bs, nct_jobs._live_page(bs, None)
+    live = nct_jobs._live_page(bs, None, work=False)
+    _clean_suno_tabs(bs, live)
+    return bs, live
+
+
+def _is_automated_batch_project(project_id: int) -> bool:
+    """True nếu project đang chạy trong một lô tự động (BatchRun status='running')."""
+    if not project_id:
+        return False
+    try:
+        from backend.models import BatchRun
+        with Session(engine) as s:
+            proj = s.get(Project, project_id)
+            bkey = (proj.batch_id if proj else "") or ""
+            if not bkey:
+                return False
+            run = s.exec(select(BatchRun).where(BatchRun.batch_key == bkey)).first()
+            return bool(run and run.status == "running")
+    except Exception:
+        return False
 
 
 def _drain() -> None:
@@ -578,26 +632,28 @@ def _drain() -> None:
                 _dry.discard(sid)
                 _state.update(mode="cover", current=sid, human="", dry_run=dry)
                 _stop.clear()     # cùng khoá với stop() → không lỡ lệnh dừng
-            try:
+
+            def ensure_live_page():
+                """Chỉ mở trình duyệt Suno SAU KHI đã chuẩn bị xong lyrics & AI Music Director,
+                tránh hiện cửa sổ trắng about:blank treo chờ nhiều phút."""
+                nonlocal bs, page
                 bs, page = _ensure_page(bs, page)
-            except Exception as e:  # noqa: BLE001
-                bs = None
-                traceback.print_exc()
-                with _lock:
-                    rest = [sid, *_pending]
-                    _pending.clear()
-                _mark(rest, "failed", f"Không mở được trình duyệt Suno: {e}"[:500])
-                _set_msg(f"Lỗi mở trình duyệt Suno: {e}")
-                continue
+                return page
+
             def reopen_page():
-                """Cốc Cốc có thể tự đóng sau một lượt tải WAV; mở phiên mới
-                ngay trong cùng worker để tiếp tục ID còn thiếu."""
+                """Mở phiên trình duyệt mới ngay trong cùng worker nếu trình duyệt tự đóng."""
                 nonlocal bs, page
                 nct_jobs._close_browser(bs)
                 bs, page = _ensure_page(None, None)
                 return page
 
-            page = _process(sid, page, dry, reopen_page=reopen_page)
+            page = _process(
+                sid,
+                page,
+                dry,
+                reopen_page=reopen_page,
+                ensure_page_fn=ensure_live_page,
+            )
     finally:
         set_cancel_check(None)
         nct_jobs._close_browser(bs)
@@ -672,7 +728,7 @@ def _transform_lyrics_isolated(lyrics: str, log) -> str:
     return result
 
 
-def _process(sid: int, page, dry: bool, reopen_page=None):
+def _process(sid: int, page, dry: bool, reopen_page=None, ensure_page_fn=None):
     """Làm cover cho 1 bài. Trả page dùng tiếp."""
     global _last_create
     with _lock:
@@ -701,12 +757,16 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
         lyrics_suno = src.lyrics_suno_text or ""
         cached_styles = src.suno_style_prompt or ""
         cached_style_sig = src.suno_style_signature or ""
+        cached_exclusions = getattr(src, "suno_exclude_styles", "") or ""
+        cached_director_json = getattr(src, "suno_director_json", "") or ""
         preserve_style = bool(src.suno_preserve_style)
         original = Path(src.file_path) if src.file_path else None
         adjusted = Path(src.tempo_file_path) if src.tempo_file_path else None
         gender = src.vocal_gender or ""
         featured_instrument = src.featured_instrument or ""
-        editor_bpm = int(src.suno_editor_bpm or 0) or editor_tempo_for_genre(
+        project_creative_instrument = bool(getattr(project, "creative_instrument", True)) if project else True
+        custom_editor_bpm = int(src.suno_editor_bpm or 0)
+        editor_bpm = custom_editor_bpm or editor_tempo_for_genre(
             project.music_style if project else "",
             project.description if project else "",
             cover_settings.cover_style if cover_settings else "")
@@ -718,7 +778,10 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
         lyrics_lang = lyrics_language(src.lyrics_text or "", project_music_line)
         editor_song_id = src.suno_editor_song_id or ""
         song_ids = [x for x in (src.suno_song_ids or "").split(",") if x.strip()]
-    semi = get_workflow()["semi_manual"]
+    in_auto_batch = _is_automated_batch_project(pid)
+    # Trong lô tự động (Mix Set / Track lẻ / Auto chỉ audio), luôn chạy Song Editor tự động
+    # để không bị kẹt chờ người dùng bấm Save as New Song ở từng bài.
+    semi = False if in_auto_batch else get_workflow()["semi_manual"]
     label = title[:50]
     out_dir = nct_jobs.cover_dir(pid, pname)
     work = out_dir / WORK_STEM
@@ -732,11 +795,30 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
         _set_human(m)
         _set_msg(f"{label}: {m}")
 
-    drv = CoverDriver(page, dry_run=dry, selectors=vconfig.get_selectors("suno"),
-                      log=log, on_human=on_human)
-    drv.debug_dir = work / "_debug"
-    latest_drv = [drv]
+    drv = None
+    latest_drv = [None]
     before: set[str] = set()
+
+    def _acquire_driver():
+        nonlocal page, drv
+        if drv is not None:
+            return drv
+        if ensure_page_fn is not None:
+            try:
+                page = ensure_page_fn()
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                with _lock:
+                    rest = list(_pending)
+                    _pending.clear()
+                if rest:
+                    _mark(rest, "failed", f"Không mở được trình duyệt Suno: {exc}"[:500])
+                raise SunoUIChanged(f"Không mở được trình duyệt Suno: {exc}") from exc
+        drv = CoverDriver(page, dry_run=dry, selectors=vconfig.get_selectors("suno"),
+                          log=log, on_human=on_human)
+        drv.debug_dir = work / "_debug"
+        latest_drv[0] = drv
+        return drv
 
     def reopen_driver():
         if reopen_page is None:
@@ -749,6 +831,7 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
         return new_drv
     try:
         if manual_watch:
+            drv = _acquire_driver()
             drv.open_create_page()
             record_login("logged_in")
             if not manual_baseline:
@@ -777,43 +860,36 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
                              log=lambda m: _append_log(log_file, f"[{label}] {m}"))
             _attach(sid, files, len(song_ids), log)
             log("✅ Tiếp nhận 2 bản thủ công thành công; automation được tiếp tục.")
-            return drv.page
+            return drv.page if drv is not None else page
 
-        # Bước 6 chỉ cần trước một lượt Create mới. Resume tải theo song_ids không
-        # chuẩn hóa/điền lại lyrics và không đụng form Suno.
-        if not song_ids:
-            # Chặn ngay tại worker (lớp bảo vệ cuối): tuyệt đối không nhờ ChatGPT
-            # tự sinh nội dung thay thế và không mở form Suno khi thiếu lời gốc.
-            if not lyrics.strip():
-                raise _NeedInput("Bài chưa có lời — dán lời ở tab ① trước.")
-            # Bước 6: tool tự chuẩn hoá lời cho Suno (bỏ nhãn đoạn, font nghệ
-            # thuật → chữ thường, gộp dấu câu, ngắt câu dài tại dấu phẩy, thay
-            # dấu cách bằng «_» để Suno hát tiếng Việt tròn vành rõ chữ). Luôn
-            # tính lại từ lời gốc nên dữ liệu cũ tự được cập nhật sang dạng mới.
-            from .suno_lyrics import normalize_for_suno
-            suno_text = normalize_for_suno(lyrics)
-            if not suno_text.strip():
-                raise _NeedInput("Lời bài hát chỉ toàn nhãn/ký tự trang trí — sửa lời ở tab ① trước.")
-            if suno_text != lyrics_suno:
-                _mark([sid], "running", None, lyrics_suno_text=suno_text)
-            log(f"Bước 6: đã chuẩn hoá lời cho Suno, thay dấu cách bằng «_» "
-                f"({sum(1 for x in suno_text.splitlines() if x.strip())} câu, "
-                f"{suno_text.count(chr(10) * 2) + 1} đoạn).")
-            lyrics = suno_text
         if song_ids and not dry:
             log("đã Create trên Suno từ lần trước — chỉ tải lại các bản (không bấm "
                 "Create lần nữa, không tốn credit).")
+            drv = _acquire_driver()
             drv.open_create_page()
             record_login("logged_in")
         else:
+            # Chặn ngay tại worker trước khi gọi AI hay mở form Suno nếu thiếu lời / file gốc / tempo.
+            if not lyrics.strip():
+                raise _NeedInput("Bài chưa có lời — dán lời ở tab ① trước.")
             if original is None or not original.exists():
                 raise _NeedInput("Chưa có file bài gốc — tải ở tab ① (hoặc nhập file bài gốc) "
                                  "rồi bấm «↻ Làm lại trên Suno».")
             if adjusted is None or not adjusted.exists():
                 raise _NeedInput("Chưa xuất file đã chỉnh tempo — vào tab ① chọn tốc độ "
                                  "và bấm «Xuất file chỉnh tempo» trước.")
-            if not lyrics.strip():
-                raise _NeedInput("Bài chưa có lời — dán lời ở tab ① trước.")
+            # Nếu lời lấy từ NCT/mạng chỉ viết 1 lượt (thiếu đoạn lặp lại sau nhạc
+            # dạo giữa như nhiều bài Bolero/Ballad dài 4–5 phút), tự đối chiếu với
+            # audio bài gốc để khôi phục đủ các câu hát lặp trước khi phân tích AI.
+            if not dry and original.is_file():
+                from .align import expand_source_lyrics_from_audio
+                expanded_raw = expand_source_lyrics_from_audio(
+                    original, lyrics, log=log)
+                if expanded_raw.strip() and expanded_raw != lyrics:
+                    lyrics = expanded_raw
+                    _mark([sid], "running", None, lyrics_text=lyrics)
+                    lyrics_lang = lyrics_language(lyrics, project_music_line)
+
             if gender not in ("male", "female", "duet"):
                 gender = guess_vocal_gender(title, artist)
                 if gender:
@@ -822,60 +898,176 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
                                "duet": "song ca nam–nữ"}[gender]
                     log(f"AI phân tích giọng hát gốc là {cast_vi}"
                         " (sửa được ở tab ②).")
-            # API AI phân tích riêng từng thể loại. Cache chỉ hợp lệ khi toàn bộ
-            # dữ liệu ảnh hưởng prompt (genre/mô tả/cover style/giọng) còn giống.
+
             from backend.core_bridge import get_api_config_from_db
-            api_config = get_api_config_from_db(str(DB_PATH))
-            base_sig = style_signature(
-                project_music_style, project_description, project_cover_style, gender,
-                featured_instrument, project_music_line, lyrics_lang)
-            expected_sig = ("ai:" if getattr(api_config, "api_key", None)
-                            else "fallback:") + base_sig
+            db_file_for_cfg = str(getattr(engine.url, "database", None) or DB_PATH)
+            api_config = get_api_config_from_db(db_file_for_cfg)
+            selected_solos = parse_solo_instruments(
+                featured_instrument, creative_instrument=project_creative_instrument)
+            md_sig = director_signature(
+                lyrics_text=lyrics,
+                music_style=project_music_style,
+                cover_style=project_cover_style,
+                music_line=project_music_line,
+                lyrics_lang=lyrics_lang,
+                description=project_description,
+                vocal_gender=gender,
+                featured_instrument=featured_instrument,
+            )
+            expected_sig = ("md:ai:" if getattr(api_config, "api_key", None)
+                            else "md:local:") + md_sig
+
+            dynamic_exclusions: str | None = None
+            dynamic_sliders: dict | None = None
+            dynamic_max_mode: bool | None = None
+
+            def _restore_director_params(raw_json: str) -> tuple[dict | None, bool | None]:
+                if not raw_json:
+                    return None, None
+                try:
+                    pkg = json.loads(raw_json)
+                    suno_cfg = pkg.get("suno") if isinstance(pkg, dict) else None
+                    if not isinstance(suno_cfg, dict):
+                        return None, None
+                    sl = {
+                        k: int(suno_cfg[k])
+                        for k in ("weirdness", "style_influence", "variety", "audio_influence")
+                        if suno_cfg.get(k) is not None
+                    }
+                    mm = bool(suno_cfg["max_mode"]) if isinstance(suno_cfg.get("max_mode"), bool) else None
+                    return (sl or None), mm
+                except Exception:
+                    return None, None
+
             if preserve_style and cached_styles.strip():
                 styles = cached_styles.strip()
-                log("Styles bước 7: chế độ tạo lại chỉ đổi Tempo — giữ nguyên "
-                    "toàn bộ prompt Styles đã dùng.")
-            elif cached_styles.strip() and cached_style_sig == expected_sig:
+                if not cached_style_sig.startswith("md:") and not selected_solos:
+                    guarded_styles = enforce_vocal_first_styles(styles)
+                    if guarded_styles != styles:
+                        styles = guarded_styles
+                        _mark([sid], "running", None, suno_style_prompt=styles)
+                if lyrics_suno.strip():
+                    suno_text = lyrics_suno.strip()
+                else:
+                    from .suno_lyrics import normalize_for_suno
+                    suno_text = normalize_for_suno(lyrics)
+                    if suno_text != lyrics_suno:
+                        _mark([sid], "running", None, lyrics_suno_text=suno_text)
+                if cached_style_sig.startswith("md:"):
+                    dynamic_exclusions = cached_exclusions
+                    dynamic_sliders, dynamic_max_mode = _restore_director_params(cached_director_json)
+                lyrics = suno_text
+                log("AI Music Director: chế độ tạo lại chỉ đổi Tempo — giữ nguyên "
+                    "toàn bộ Lyrics/Styles/thông số đã lưu.")
+            elif (cached_styles.strip() and lyrics_suno.strip()
+                  and cached_style_sig == expected_sig):
                 styles = cached_styles.strip()
-                log("Styles bước 7: dùng lại prompt AI đã lưu (thể loại không đổi).")
+                lyrics = lyrics_suno.strip()
+                dynamic_exclusions = cached_exclusions
+                dynamic_sliders, dynamic_max_mode = _restore_director_params(cached_director_json)
+                log("AI Music Director: dùng lại gói cấu trúc Lyrics & Styles đã lưu "
+                    "(lời bài hát và cấu hình không đổi).")
             else:
-                styles, style_source = generate_cover_styles(
-                    project_music_style, project_description, project_cover_style,
-                    gender, title, artist, featured_instrument,
-                    music_line=project_music_line, lyrics_lang=lyrics_lang,
-                    api_config=api_config, log=log)
-                sig_prefix = "ai:" if style_source == "ai" else "fallback:"
-                _mark([sid], "running", None,
-                      suno_style_prompt=styles,
-                      suno_style_signature=sig_prefix + base_sig)
-            # Áp dụng cả cho cache cũ/chế độ giữ Styles: bỏ mọi yêu cầu solo và
-            # khóa vocal làm trung tâm trước khi điền form Suno.
-            guarded_styles = enforce_vocal_first_styles(styles)
-            if guarded_styles != styles:
-                styles = guarded_styles
-                _mark([sid], "running", None, suno_style_prompt=styles)
-            log(f"Styles bước 7: {styles}")
+                director_res = run_music_director(
+                    original_lyrics=lyrics,
+                    music_style=project_music_style,
+                    description=project_description,
+                    cover_style=project_cover_style,
+                    vocal_gender=gender,
+                    title=title,
+                    artist=artist,
+                    featured_instrument=featured_instrument,
+                    creative_instrument=project_creative_instrument,
+                    music_line=project_music_line,
+                    lyrics_lang=lyrics_lang,
+                    underscore_formatting=True,
+                    api_config=api_config,
+                    log=log,
+                )
+                suno_text = director_res.lyrics
+                styles = director_res.style
+                dynamic_exclusions = director_res.exclude_styles
+                dynamic_sliders = director_res.sliders
+                dynamic_max_mode = director_res.max_mode
+                sig_prefix = "md:ai:" if director_res.source == "ai" else "md:local:"
+                extra_fields: dict = {}
+                if gender not in ("male", "female", "duet") and director_res.vocal_gender in (
+                    "male", "female", "duet"
+                ):
+                    gender = director_res.vocal_gender
+                    extra_fields["vocal_gender"] = gender
+                # Tuyệt đối KHÔNG ghi đè src.lyrics_text bằng bản có [...] và '_'
+                _mark(
+                    [sid],
+                    "running",
+                    None,
+                    lyrics_suno_text=suno_text,
+                    suno_style_prompt=styles,
+                    suno_exclude_styles=dynamic_exclusions,
+                    suno_director_json=json.dumps(director_res.raw_package, ensure_ascii=False),
+                    suno_style_signature=sig_prefix + md_sig,
+                    **extra_fields,
+                )
+                lyrics = suno_text
+
+            log(f"Styles (AI Music Director): {styles}")
+            if dynamic_exclusions is not None:
+                log(f"Exclude Styles: {dynamic_exclusions or '(trống)'}")
             log("đang mở Suno…")
+            # Chế độ Auto (người dùng không nhập tay editor_bpm): tự căn Tempo trong
+            # Suno Song Editor sao cho tổng thời lượng trên timeline khớp 100% độ dài bài gốc.
+            target_duration_sec: float | None = None
+            if custom_editor_bpm <= 0 and not semi:
+                target_duration_sec = audio_duration_seconds(original)
+            drv = _acquire_driver()
             if semi:
-                log("workflow BÁN THỦ CÔNG: tool upload + mở Editor → BẠN chỉnh Tempo "
-                    f"(gợi ý {editor_bpm}) + Save as New Song → tool Remix → Cover, "
-                    "điền form → BẠN bấm Create → tool tải về, master, sang bài sau.")
+                log("workflow BÁN THỦ CÔNG: tool upload + mở Song Editor + điền sẵn "
+                    "Add Lyrics ([...] + «_») & Styles AI → BẠN chỉnh Tempo "
+                    f"(gợi ý {editor_bpm}) + Save as New Song → tool tự Remix → Cover, "
+                    "điền đủ thông số, tự bấm Create, tải về, master và sang bước tiếp theo.")
+            elif target_duration_sec is not None and target_duration_sec > 5.0:
+                log(f"workflow Song Editor: tự căn Tempo về đúng 100% độ dài bài gốc "
+                    f"({_fmt_mmss(target_duration_sec)}, fallback {editor_bpm} BPM), điền Add Lyrics "
+                    "([... ] + «_») & đồng bộ Styles AI, Save as New Song, rồi Remix → Cover.")
             else:
-                log(f"workflow Editor: đặt Tempo = {editor_bpm}, Save as New Song, "
-                    "rồi Remix → Cover.")
-            log("tiếp tục bước 7: dùng lyrics đã qua bước 6 để điền form Cover.")
+                log(f"workflow Song Editor: đặt Tempo = {editor_bpm}, điền Add Lyrics ([...] + «_») "
+                    "& đồng bộ Styles AI, Save as New Song, rồi Remix → Cover.")
+            log("tiếp tục bước 7: dùng structured lyrics của AI Music Director để điền form Cover.")
             def remember_editor(saved_id: str) -> None:
                 _mark([sid], "running", None, suno_editor_song_id=saved_id)
                 log(f"đã lưu trạng thái Editor song {saved_id} để lần lỗi sau "
                     "không upload lại.")
+            prep_kwargs: dict = {
+                "editor_bpm": editor_bpm,
+                "editor_song_id": editor_song_id,
+                "styles": styles,
+                "on_editor_saved": remember_editor,
+            }
+            try:
+                sig_params = inspect.signature(drv.prepare_cover).parameters
+                accepts_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
+                )
+            except (TypeError, ValueError):
+                sig_params, accepts_var_kw = {}, True
+            optional_items: list[tuple[str, object]] = [
+                ("exclusions", dynamic_exclusions),
+                ("sliders", dynamic_sliders),
+                ("max_mode", dynamic_max_mode),
+                ("target_duration_sec", target_duration_sec),
+            ]
+            if semi:
+                optional_items.extend([
+                    ("manual_editor", True),
+                    ("alert", _beep_human(on_human, drv)),
+                    ("manual_wait_sec", MANUAL_WAIT_SEC),
+                ])
+            for opt_name, opt_val in optional_items:
+                if opt_val is not None and (accepts_var_kw or opt_name in sig_params):
+                    prep_kwargs[opt_name] = opt_val
             drv.prepare_cover(adjusted, title, lyrics, gender,
-                              int(vconfig.SUNO.credits_per_create), editor_bpm=editor_bpm,
-                              editor_song_id=editor_song_id,
-                              styles=styles,
-                              on_editor_saved=remember_editor,
-                              **({"manual_editor": True,
-                                  "alert": _beep_human(on_human, drv),
-                                  "manual_wait_sec": MANUAL_WAIT_SEC} if semi else {}))
+                              int(vconfig.SUNO.credits_per_create),
+                              **prep_kwargs)
             # CoverDriver chỉ gán thuộc tính này sau khi đã đọc lại chính
             # control Tempo của Suno Editor và xác nhận đúng. Driver tương thích
             # cũ/test không có thuộc tính thì dùng BPM đã yêu cầu.
@@ -893,31 +1085,20 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
                 log("🧪 chạy thử xong — form đã điền đủ, không bấm Create.")
                 return page
             attempt, stale, manual_ids = 0, "", None
-            if semi:
-                _checkpoint()
-                before = drv.snapshot_song_ids()
-                manual_ids, stale = _await_semi_create(drv, sid, before,
-                                                       log, _beep_human(on_human, drv))
-                _last_create = time.monotonic()
-                _set_human("")
-                log(f"thấy {len(manual_ids)} bản từ lượt Create bạn bấm — tool tiếp tục "
-                    "theo dõi bảng cam, tải về và master.")
-            else:
-                _pace(drv, log)
-                _checkpoint()
+            _pace(drv, log)
+            _checkpoint()
             # Bộ lọc thư viện có thể che bài mới khỏi DOM. Việc xoá filter chỉ
             # là lớp dự phòng; SunoDriver còn nhận UUID trực tiếp từ response
             # /generate nên không phụ thuộc hoàn toàn vào giao diện danh sách.
-            if not semi:
-                try:
-                    drv._clear_library_filters()
-                except Exception as exc:
-                    log(f"không xoá được filter thư viện trước Create: {exc}; "
-                        "sẽ nhận ID từ phản hồi Create.")
-                before = drv.snapshot_song_ids()
-                log("bấm Create…")
-                drv.click_create()
-                _last_create = time.monotonic()
+            try:
+                drv._clear_library_filters()
+            except Exception as exc:
+                log(f"không xoá được filter thư viện trước Create: {exc}; "
+                    "sẽ nhận ID từ phản hồi Create.")
+            before = drv.snapshot_song_ids()
+            log("đã điền đủ thông số form Cover — tự động bấm Create…")
+            drv.click_create()
+            _last_create = time.monotonic()
             while True:
                 try:
                     song_ids = _create_and_watch(drv, sid, before, stale, log, on_human,
@@ -927,6 +1108,12 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
                     attempt += 1
                     shot = drv.save_debug("copyright_toast") or ""
                     log(f"bảng cam Suno: «{toast}»" + (f" (ảnh: {shot})" if shot else ""))
+                    if in_auto_batch:
+                        # Trong lô chạy hàng loạt tự động: không giữ luồng treo 30 phút ở 1 bài bản quyền;
+                        # đánh dấu bài này rejected để lô tự chuyển ngay sang bài tiếp theo.
+                        raise SunoCoverRejected(
+                            f"Suno báo lyrics bản quyền («{toast}»)"
+                        )
                     if attempt > MAX_LYRICS_RETRIES:
                         raise SunoCoverRejected(
                             f"Suno báo lyrics bản quyền {attempt} lần liên tiếp: «{toast}»")
@@ -952,12 +1139,12 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
                 _resume_ids.add(sid)
         _mark([sid], "stopped", STOPPED_MSG)
         _set_msg("Đã dừng.")
-    except _NeedInput as e:
-        _mark([sid], "failed", str(e))
+    except (_NeedInput, MusicDirectorError) as e:
+        _mark([sid], "failed", str(e)[:800])
         log(str(e))
     except SunoCoverRejected as e:
         try:
-            baseline = before or drv.snapshot_song_ids()
+            baseline = before or (drv.snapshot_song_ids() if drv is not None else set())
         except Exception:
             baseline = set()
         with _lock:
@@ -1001,18 +1188,49 @@ def _process(sid: int, page, dry: bool, reopen_page=None):
             log(f"dừng cả hàng đợi: {why[:200]}")
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        why = f"{type(e).__name__}: {e}"
+        raw_why = f"{type(e).__name__}: {e}"
+        closed_browser = (
+            "target page, context or browser has been closed" in raw_why.casefold()
+            or "browser has been closed" in raw_why.casefold()
+            or type(e).__name__ == "TargetClosedError"
+        )
         if _looks_rejected(str(e)):
             _mark([sid], "rejected", (f"Suno từ chối: {e} Không tự biến dạng lyrics "
                   "hoặc Create lại; chỉ thử lại với nội dung tự sáng tác/được phép.")[:800])
             log("Suno từ chối vì bản quyền — bỏ qua an toàn, không obfuscate lyrics.")
+        elif closed_browser:
+            friendly = ("Trình duyệt Suno đã bị đóng giữa chừng — bấm «🎧 Auto chỉ audio» "
+                        "(hoặc «↻ Làm lại trên Suno») để mở lại trình duyệt và chạy tiếp.")
+            _mark([sid], "failed", friendly)
+            _halt_queue("Trình duyệt Suno đã bị đóng")
+            log("trình duyệt Suno đã bị đóng giữa chừng — tạm dừng hàng đợi an toàn.")
         else:
-            shot = drv.save_debug("error") or ""
-            _mark([sid], "failed", why[:600] + (f" (ảnh chụp: {shot})" if shot else ""))
+            shot = (drv.save_debug("error") if drv is not None else "") or ""
+            _mark([sid], "failed", raw_why[:600] + (f" (ảnh chụp: {shot})" if shot else ""))
             log(f"lỗi: {e}")
     finally:
         _set_human("")
-    return drv.page
+        try:
+            with Session(engine) as s_done:
+                cur_src = s_done.get(SourceSong, sid)
+                cur_st = (cur_src.suno_status if cur_src else "") or ""
+                cur_err = cur_src.suno_error if cur_src else None
+            mapped = ("completed" if cur_st in ("done", "tested")
+                      else "cancelled" if cur_st == "stopped"
+                      else "failed" if cur_st in ("failed", "rejected")
+                      else "")
+            if mapped:
+                with _lock:
+                    _state.update(
+                        last_sid=sid,
+                        last_status=mapped,
+                        last_message=_state.get("message") or "",
+                        last_error=cur_err,
+                        finished_at=time.time(),
+                    )
+        except Exception:
+            pass
+    return drv.page if drv is not None else page
 
 
 class _NeedInput(RuntimeError):
